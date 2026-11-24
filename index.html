@@ -1403,28 +1403,45 @@ table.ev tr.ok td:last-child{color:var(--force)}
     if (g >= 1.4) return -0.011 + ((g - 1.4) * (0.144 + 0.011)) / 0.3;
     return -0.011 + ((g - 1.4) * (0.011 - 0.093)) / -0.4;
   }
-  function stackElbow(S, G, a, b, pole, fallback, prefer) {
+  // Bench elbow kinematics on the 1-DOF reachable circle around the shoulder->hand axis (S->G).
+  // Lifters naturally stack the wrist over the elbow in the frontal plane (E.z = G.z) so the forearm does not
+  // twist the humerus under load; however, when a style or the Elbow flare slider deliberately requests a flare
+  // angle outside what vertical forearms allow (e.g. Flat back, flared at 80°), rotate smoothly along the same
+  // reachable circle to the exact requested humerus flare angle in the thorax YZ plane.
+  function solveBenchElbow(S, G, a, b, Rt, sg, tuckRad, pole, fallback, flareW) {
     const d = V.dist(S, G); if (d >= a + b - 1e-3 || d < 1e-6) return fallback;
     const u = V.mul(V.sub(G, S), 1 / d), x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x));
     if (h < 1e-4) return fallback;
     const C = V.addm(S, u, x), e1 = V.norm(V.perp(pole, u)), e2 = V.cross(u, e1);
-    const A = h * e1[2], B = h * e2[2], R = Math.hypot(A, B), tz = G[2] - C[2];
-    if (R < 1e-6) return fallback;
-    const ph0 = Math.atan2(B, A), rr = clamp(tz / R, -1, 1);
-    // acos runs vertical as the hand height reaches the edge of what the elbow can stack under; ease it in so
-    // the elbow glides rather than snaps across that edge
-    const dph = Math.acos(rr) * smooth(0, 1, (1 - rr) / 0.12);
     const wrap = (q) => Math.atan2(Math.sin(q), Math.cos(q));
-    const p1 = wrap(ph0 + dph), p2 = wrap(ph0 - dph);
-    // Near lockout the reachable circle shrinks and the stacked point would race round it (the elbow swinging
-    // from tucked to flared in the last few centimetres). Lifters just straighten the arm, so the elbow eases
-    // back onto the plane it is aimed in (the pole) as the arm nears straight.
-    // of the two stacked points keep the one toward the feet: it stays on one branch for the whole rep, where
-    // picking the one nearer the pole would hop between branches where they pass level
     const at = (q) => V.add(V.mul(e1, Math.cos(q)), V.mul(e2, Math.sin(q)));
-    const pick = prefer ? (V.dot(at(p1), prefer) >= V.dot(at(p2), prefer) ? p1 : p2) : Math.abs(p1) < Math.abs(p2) ? p1 : p2;
-    const ph = pick * smooth(0.25, 0.5, h / a);
-    return V.add(C, V.add(V.mul(e1, h * Math.cos(ph)), V.mul(e2, h * Math.sin(ph))));
+    // 1) Stacked-forearm elbow (E.z = G.z, keeping the branch toward the feet for continuity)
+    const Az = h * e1[2], Bz = h * e2[2], Rz = Math.hypot(Az, Bz), tz = G[2] - C[2];
+    let phS = 0;
+    if (Rz > 1e-6) {
+      const ph0 = Math.atan2(Bz, Az), rr = clamp(tz / Rz, -1, 1);
+      const dph = Math.acos(rr) * smooth(0, 1, (1 - Math.abs(rr)) / 0.12);
+      const p1 = wrap(ph0 + dph), p2 = wrap(ph0 - dph);
+      const pref = M.ap(Rt, [0, -1, 0]);
+      phS = V.dot(at(p1), pref) >= V.dot(at(p2), pref) ? p1 : p2;
+    }
+    let ph = phS;
+    if (flareW > 1e-4) {
+      // 2) Exact requested humerus flare angle in thorax YZ plane (sg * h_z / -h_y = tan(tuckRad))
+      const n = M.ap(Rt, [0, Math.sin(tuckRad), Math.cos(tuckRad) * sg]);
+      const c0 = V.dot(V.sub(C, S), n);
+      const An = h * V.dot(e1, n), Bn = h * V.dot(e2, n), Rn = Math.hypot(An, Bn);
+      if (Rn > 1e-6) {
+        const ph0 = Math.atan2(Bn, An), rr = clamp(-c0 / Rn, -1, 1);
+        const dph = Math.acos(rr) * smooth(0, 1, (1 - Math.abs(rr)) / 0.12);
+        const p1 = wrap(ph0 + dph), p2 = wrap(ph0 - dph);
+        const phF = V.dot(at(p1), pole) >= V.dot(at(p2), pole) ? p1 : p2;
+        ph = wrap(phS + wrap(phF - phS) * flareW);
+      }
+    }
+    // Near lockout ease smoothly back toward the aiming plane as the reachable circle shrinks
+    ph *= smooth(0.25, 0.5, h / a);
+    return V.add(C, V.mul(at(ph), h));
   }
   function solveBench(body, t, p) {
     const s = body.s, beta = rad(t.incline || 0), arch = t.arch || 0;
@@ -1468,11 +1485,13 @@ table.ev tr.ok td:last-child{color:var(--force)}
       const tgt = [bx, by, sg * gripH];
       const pole = M.ap(Rt, [0, -Math.cos(tuck), Math.sin(tuck) * sg]);
       const ik = ik2(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, pole);
-      // lifters stack the wrist over the elbow seen from the feet (forearm vertical in the frontal plane), so
-      // the elbow sits on its reachable circle where it is level with the hand; of the two such points the
-      // one nearer the chosen tuck is used. A slanted forearm would twist the humerus under load, which only
-      // the rotator cuff can resist.
-      const E = stackElbow(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, pole, ik.mid, M.ap(Rt, [0, -1, 0]));
+      // Compare requested flare (tuck) against what a vertically stacked forearm achieves at the chest touch point:
+      // stacked styles stay vertical; flared/tucked overrides rotate cleanly along the elbow's reachable circle.
+      const E0s = solveBenchElbow(J.S[sd], [T[0], T[1], sg * gripH], body.Lh, body.Lfa + body.Lgrip, Rt, sg, tuck, pole, ik.mid, 0);
+      const h0T = M.ap(M.T(Rt), V.norm(V.sub(E0s, J.S[sd])));
+      const flS0 = Math.atan2(h0T[2] * sg, -h0T[1]);
+      const flareW = smooth(rad(14.5), rad(28), Math.abs(tuck - flS0));
+      const E = solveBenchElbow(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, Rt, sg, tuck, pole, ik.mid, flareW);
       (J.P = J.P || {})[sd] = pole;
       J.E[sd] = E; J.G[sd] = tgt; J.W[sd] = wristOf(body, E, tgt);
       J.H[sd] = toW(f.pelvis, [0, 0, sg * body.hipHalf]);
