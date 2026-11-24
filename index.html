@@ -8354,10 +8354,18 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       try {
         const cv = document.createElement('canvas');
         cv.width = 4; cv.height = 4;
-        const gl = cv.getContext('webgl2', { antialias: true, alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+        const gl = cv.getContext('webgl2', { antialias: true, alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'low-power' });
         if (!gl) { this.failed = true; return; }
         this.cv = cv;
         this.gl = gl;
+        // Detect CPU software WebGL (SwiftShader / LLVMpipe) so the app can throttle DPR & FPS instead of pinning CPU cores
+        let rendererStr = '';
+        try {
+          const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+          rendererStr = String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) || '');
+        } catch (e) { /* ignore */ }
+        this.renderer = rendererStr;
+        this.isSoftware = /swiftshader|llvmpipe|softpipe|software|subzero/i.test(rendererStr);
         this.progs = {
           bone: compileProg(gl, BONE_VS, BONE_FS),
           mus: compileProg(gl, MUSCLE_VS, MUSCLE_FS),
@@ -8582,6 +8590,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     // Exact real-time 3D curved & bone-wrapped fiber strain (L_now / L_rest) from the muscle's 5-point centerline
     muscleStrain(gm, sd, body) {
       if (!gm.sp || gm.sp.length < 2 || gm.td) return 1.0;
+      const cache = sd === 'L' ? this._strainL : this._strainR;
+      if (cache && cache[gm.id] !== undefined) return cache[gm.id];
       this.ensureRestLengths(body);
       const mat = sd === 'L' ? this.skinL : this.skinR;
       const quat = sd === 'L' ? this.quatL : this.quatR;
@@ -8598,7 +8608,9 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         px = pw[0]; py = pw[1]; pz = pw[2];
       }
       const Lrest = this._restL[gm.id] || gm.L0;
-      return Lrest > 1e-4 ? clamp(len / Lrest, 0.58, 1.55) : 1.0;
+      const val = Lrest > 1e-4 ? clamp(len / Lrest, 0.58, 1.55) : 1.0;
+      if (cache) cache[gm.id] = val;
+      return val;
     },
 
     // Transform a rest-pose anchor point [seg, x, y, z] to world space on side sd ('R'|'L')
@@ -9018,8 +9030,14 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       const W = rr.W, H = rr.H;
       if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
 
-      computeSideSkin(sc.pose, sc.body, this.data.invBind, 'R', this.skinR, this.normR, this.quatR, this.collR);
-      computeSideSkin(sc.pose, sc.body, this.data.invBind, 'L', this.skinL, this.normL, this.quatL, this.collL);
+      if (this._skinPose !== sc.pose || this._skinBody !== sc.body) {
+        computeSideSkin(sc.pose, sc.body, this.data.invBind, 'R', this.skinR, this.normR, this.quatR, this.collR);
+        computeSideSkin(sc.pose, sc.body, this.data.invBind, 'L', this.skinL, this.normL, this.quatL, this.collL);
+        this._skinPose = sc.pose;
+        this._skinBody = sc.body;
+        this._strainR = Object.create(null);
+        this._strainL = Object.create(null);
+      }
       buildVP(rr, this.vp, this.view);
 
       const atlas = rr.atlas;
@@ -9220,8 +9238,14 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       const gl = this.gl;
       const W = rr.W, H = rr.H;
       rr.begin();
-      computeSideSkin(sc.pose, sc.body, this.data.invBind, 'R', this.skinR, this.normR, this.quatR, this.collR);
-      computeSideSkin(sc.pose, sc.body, this.data.invBind, 'L', this.skinL, this.normL, this.quatL, this.collL);
+      if (this._skinPose !== sc.pose || this._skinBody !== sc.body) {
+        computeSideSkin(sc.pose, sc.body, this.data.invBind, 'R', this.skinR, this.normR, this.quatR, this.collR);
+        computeSideSkin(sc.pose, sc.body, this.data.invBind, 'L', this.skinL, this.normL, this.quatL, this.collL);
+        this._skinPose = sc.pose;
+        this._skinBody = sc.body;
+        this._strainR = Object.create(null);
+        this._strainL = Object.create(null);
+      }
       buildVP(rr, this.vp, this.view);
 
       // Shift NDC window to render just the 1x1 pixel at (px, py) into pickFbo
@@ -11240,7 +11264,10 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   if (!S.refs) S.refs = refsDefault(S.lifter.mass);
 
   let cmpRep = null;
-  let body, caps, rest, rep = null, cmpCache = null, cur = null, curB = null, dirty = true, cfgDirty = true;
+  let body, caps, rest, rep = null, cmpCache = null, cur = null, curB = null, _dirty = true, cfgDirty = true;
+  let rafId = 0, lastDrawT = 0, lastActT = performance.now(), blurAt = 0, blurPaused = false;
+  function wake() { if (!rafId && !document.hidden) rafId = requestAnimationFrame(tick); }
+  function markDirty() { _dirty = true; wake(); }
   const rangeOf = (liftId) => (movOf(liftId || S.lift).loadRange) || { minKg: 20, maxKg: 300, stepKg: 2.5, minLb: 45, maxLb: 660, stepLb: 5 };
   const tech = () => Object.assign({}, movOf(S.lift).variants[S.variant[S.lift]], S.tune[S.lift]);
   const fmtLoad = (kg, liftId) => {
@@ -11477,7 +11504,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     caps = L.calibrate(body, S.refs, calOpts());
     estCache.clear();
     rest = L.restLengths(body);
-    cmpCache = null; cfgDirty = false; dirty = true;
+    cmpCache = null; cfgDirty = false; markDirty();
     if (S.mode === 'compare') { buildComparePanel(); }
     else { rep = sampleRep(); paintScrub(); buildMuscles(); buildJoints(); updateLoadUI(); if (S.tab === 'adjust') buildCompare(); buildStory(); }
     updateYou(); updateLimit();
@@ -11485,7 +11512,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   }
   let cfgTimer = 0, slowTimer = 0;
   function touchConfig(now) {
-    cfgDirty = true; dirty = true;
+    cfgDirty = true; markDirty();
     if (now) { reconfigure(); return; }
     if (!cfgTimer) cfgTimer = requestAnimationFrame(() => { cfgTimer = 0; if (cfgDirty) reconfigure(); });
   }
@@ -11600,7 +11627,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   function resize() {
     const w = stage.clientWidth, h = stage.clientHeight;
     if (w < 10 || h < 10) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1), two = split();
+    const rawDpr = window.devicePixelRatio || 1;
+    const dpr = (L.GL && L.GL.isSoftware) ? 1 : Math.min(w > 900 ? 1.5 : 2, rawDpr), two = split();
     stage.classList.toggle('two', two);
     cv2.hidden = !two;
     const cw = two ? w / 2 : w;
@@ -11613,7 +11641,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     stage.classList.toggle('short', short);
     if (short) { const top = 46, bot = 58, band = Math.max(80, h - top - bot); R.cam.hf = band / h; R.cam.cyf = (top + band * 0.52) / h; }
     if (phone.on()) { stage.classList.remove('short'); phone.frame(); }
-    dirty = true;
+    markDirty();
     const sw = document.querySelector('.stagewrap');
     if (sw) document.documentElement.style.setProperty('--stuck', (window.innerWidth < 860 ? sw.offsetHeight : 0) + 'px');
     if (S.mode === 'single' && S.tab === 'joints') buildJoints();
@@ -11624,7 +11652,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const c = movOf(lift).cam;
     R.cam.target = c.target.slice(); R.cam.fit = c.fit * (split() ? 1.06 : 1);
     const to = { yaw: rad(c.def[0]), pitch: rad(c.def[1]), zoom: 1, off: [0, 0, 0] };
-    if (animate) camTo = to; else { Object.assign(R.cam, to); R.cam.off = [0, 0, 0]; }
+    if (animate) { camTo = to; wake(); } else { Object.assign(R.cam, to); R.cam.off = [0, 0, 0]; markDirty(); }
     const zr = $('zReset'); if (zr) zr.hidden = true;
     viewName = null; buildViews();
   }
@@ -11641,7 +11669,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   $('views').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     const v = movOf(camLift()).cam.views[b.dataset.view];
-    viewName = b.dataset.view; camTo = { yaw: rad(v[0]), pitch: rad(v[1]), zoom: 1, off: [0, 0, 0] }; $('zReset').hidden = true; buildViews(); dirty = true;
+    viewName = b.dataset.view; camTo = { yaw: rad(v[0]), pitch: rad(v[1]), zoom: 1, off: [0, 0, 0] }; $('zReset').hidden = true; buildViews(); markDirty();
   });
   // ---------------- camera gestures ----------------
   // One finger (or the mouse) turns the lifter. Two fingers pinch to zoom toward the point between them and
@@ -11667,18 +11695,18 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     rr.begin();
     const d = rr.dpr, mx = ex == null ? 0 : (ex * d - rr.cx) / rr.ppm, my = ey == null ? 0 : -(ey * d - rr.cy) / rr.ppm, k = 1 - 1 / f, V3 = rr.Rv, o = offOf();
     for (let i = 0; i < 3; i++) o[i] += (V3[i] * mx + V3[3 + i] * my) * k;
-    c.zoom = z1; camTo = null; clampOff(); dirty = true; showReset();
+    c.zoom = z1; camTo = null; clampOff(); markDirty(); showReset();
   }
   function panBy(rr, dx, dy) {
     rr.begin();
     const m = rr.dpr / rr.ppm, V3 = rr.Rv, o = offOf();
     for (let i = 0; i < 3; i++) o[i] -= (V3[i] * dx - V3[3 + i] * dy) * m;
-    camTo = null; clampOff(); dirty = true; showReset();
+    camTo = null; clampOff(); markDirty(); showReset();
   }
   function clampOff() { const o = offOf(), n = Math.hypot(o[0], o[1], o[2]), lim = 1.4; if (n > lim) for (let i = 0; i < 3; i++) o[i] *= lim / n; }
   const zoomed = () => Math.abs(R.cam.zoom - 1) > 0.04 || Math.hypot(...offOf()) > 0.01;
   function showReset() { const b = $('zReset'); if (b) b.hidden = !zoomed(); }
-  function resetView() { camTo = { yaw: R.cam.yaw, pitch: R.cam.pitch, zoom: 1, off: [0, 0, 0] }; dirty = true; $('zReset').hidden = true; }
+  function resetView() { camTo = { yaw: R.cam.yaw, pitch: R.cam.pitch, zoom: 1, off: [0, 0, 0] }; markDirty(); $('zReset').hidden = true; }
   const local = (el, e) => { const rc = el.getBoundingClientRect(); return [e.clientX - rc.left, e.clientY - rc.top]; };
   const ptrs = new Map(); let drag = null, pinch = null;
   const onDown = (e) => {
@@ -11707,7 +11735,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         } else {
           camTo = null; if (viewName) { viewName = null; buildViews(); }
           R.cam.yaw = drag.yaw - dx * 0.0085; R.cam.pitch = clamp(drag.pitch + dy * 0.006, rad(-12), rad(88));
-          dirty = true;
+          markDirty();
         }
       }
       drag.lx = e.clientX; drag.ly = e.clientY;
@@ -11749,7 +11777,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     rr.begin();
     const d = rr.dpr, mx = (ex * d - rr.cx) / rr.ppm, my = -(ey * d - rr.cy) / rr.ppm, k = 1 - 1 / f, V3 = rr.Rv, o = offOf().slice();
     for (let i = 0; i < 3; i++) o[i] += (V3[i] * mx + V3[3 + i] * my) * k;
-    camTo = { yaw: c.yaw, pitch: c.pitch, zoom: c.zoom * f, off: o }; dirty = true; $('zReset').hidden = false;
+    camTo = { yaw: c.yaw, pitch: c.pitch, zoom: c.zoom * f, off: o }; markDirty(); $('zReset').hidden = false;
   }
   for (const el of [cv, cv2]) {
     el.addEventListener('pointerdown', onDown); el.addEventListener('pointermove', onMove);
@@ -11788,15 +11816,15 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   rail.addEventListener('pointerdown', (e) => {
     if (e.target.closest('.stop')) return;
     railDrag = true; try { rail.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
-    S.layer = S.layerTo = railVal(e); dirty = true; updateRail();
+    S.layer = S.layerTo = railVal(e); markDirty(); updateRail();
   });
-  rail.addEventListener('pointermove', (e) => { if (railDrag) { S.layer = S.layerTo = railVal(e); dirty = true; updateRail(); } });
-  const railEnd = () => { if (railDrag) { railDrag = false; S.layerTo = Math.round(S.layer); dirty = true; } };
+  rail.addEventListener('pointermove', (e) => { if (railDrag) { S.layer = S.layerTo = railVal(e); markDirty(); updateRail(); } });
+  const railEnd = () => { if (railDrag) { railDrag = false; S.layerTo = Math.round(S.layer); markDirty(); } };
   rail.addEventListener('pointerup', railEnd); rail.addEventListener('pointercancel', railEnd);
-  rail.addEventListener('click', (e) => { const b = e.target.closest('.stop'); if (b) { S.layerTo = +b.dataset.stop; if (RM) S.layer = S.layerTo; dirty = true; } });
+  rail.addEventListener('click', (e) => { const b = e.target.closest('.stop'); if (b) { S.layerTo = +b.dataset.stop; if (RM) S.layer = S.layerTo; markDirty(); } });
   rail.addEventListener('keydown', (e) => {
     const d = e.key === 'ArrowDown' || e.key === 'ArrowRight' ? 1 : e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? -1 : 0;
-    if (d) { e.preventDefault(); S.layerTo = clamp(Math.round(S.layerTo) + d, 0, 4); if (RM) S.layer = S.layerTo; dirty = true; }
+    if (d) { e.preventDefault(); S.layerTo = clamp(Math.round(S.layerTo) + d, 0, 4); if (RM) S.layer = S.layerTo; markDirty(); }
   });
   function updateRail() {
     const f = clamp(S.layer / 4, 0, 1);
@@ -11808,17 +11836,17 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   }
 
   // transport
-  $('play').addEventListener('click', () => { S.playing = !S.playing; updatePlay(); dirty = true; });
+  $('play').addEventListener('click', () => { S.playing = !S.playing; updatePlay(); markDirty(); });
   function updatePlay() { $('play').dataset.state = S.playing ? 'playing' : 'paused'; $('play').setAttribute('aria-label', S.playing ? 'Pause' : 'Play'); }
-  $('scrub').addEventListener('input', (e) => { S.playing = false; S.u = e.target.value / 1000; updatePlay(); dirty = true; });
+  $('scrub').addEventListener('input', (e) => { S.playing = false; S.u = e.target.value / 1000; updatePlay(); markDirty(); });
   // scrolling over the timeline moves through the rep, sideways or up and down, whichever the fingers do
   document.querySelector('.timeline').addEventListener('wheel', (e) => {
     e.preventDefault();
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY, k = e.deltaMode === 1 ? 16 : 1;
-    S.playing = false; S.u = ((S.u + (d * k) / 1400) % 1 + 1) % 1; $('scrub').value = Math.round(S.u * 1000); updatePlay(); dirty = true;
+    S.playing = false; S.u = ((S.u + (d * k) / 1400) % 1 + 1) % 1; $('scrub').value = Math.round(S.u * 1000); updatePlay(); markDirty();
   }, { passive: false });
   $('speed').addEventListener('click', () => { S.speed = S.speed === 1 ? 0.4 : S.speed === 0.4 ? 0.15 : 1; $('speed').textContent = S.speed === 1 ? '1×' : S.speed === 0.4 ? '0.4×' : '0.15×'; });
-  $('forces').addEventListener('click', () => { S.forces = !S.forces; $('forces').setAttribute('aria-pressed', S.forces); dirty = true; });
+  $('forces').addEventListener('click', () => { S.forces = !S.forces; $('forces').setAttribute('aria-pressed', S.forces); markDirty(); });
   const PAINT = { effort: 'Effort', anatomy: 'Anatomy', diff: 'Difference' };
   function paintModes() { return S.mode === 'compare' ? ['effort', 'diff', 'anatomy'] : ['effort', 'anatomy']; }
   function updatePaint() {
@@ -11826,7 +11854,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     $('paint').innerHTML = '<span>Colour</span>' + PAINT[S.paint];
     $('paint').setAttribute('aria-label', 'Colour muscles by ' + PAINT[S.paint].toLowerCase() + '. Tap to change.');
     $('scaleEff').hidden = S.paint !== 'effort'; $('scaleDiff').hidden = S.paint !== 'diff';
-    dirty = true;
+    markDirty();
   }
   $('paint').addEventListener('click', () => { const m = paintModes(); S.paint = m[(m.indexOf(S.paint) + 1) % m.length]; updatePaint(); });
   document.addEventListener('keydown', (e) => {
@@ -11904,14 +11932,14 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       viewName = null; buildViews();
       if (S.layer < 1.9 || S.layer > 3.1) S.layerTo = 2;
     }
-    dirty = true; updatePick();
+    markDirty(); updatePick();
   }
   function selectJoint(id, openTab) {
     S.selJoint = id;
     if (id) { S.sel = null; document.querySelectorAll('.mrow').forEach((b) => b.setAttribute('aria-pressed', 'false')); }
     if (id && openTab && S.mode === 'single') setTab('joints');
     document.querySelectorAll('.joint').forEach((b) => b.classList.toggle('sel', b.dataset.j === id));
-    dirty = true; updatePick();
+    markDirty(); updatePick();
   }
   $('pickClose').addEventListener('click', () => { S.pickStack = null; selectRow(null); selectJoint(null); });
   $('pickStack').addEventListener('click', (e) => {
@@ -12288,7 +12316,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     if (t === 'adjust') { buildCompare(); showBest(); }
     if (t === 'joints') { if (S.mode === 'single') buildJoints(); else if (cmpRep) buildCJoints(); }
     liveBoards(true);
-    dirty = true;
+    markDirty();
   }
   $('tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
   function updateLimit() {
@@ -12334,7 +12362,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const b = e.target.closest('button'); if (!b) return;
     S.unit = b.dataset.unit;
     document.querySelectorAll('.units button').forEach((x) => x.setAttribute('aria-pressed', x.dataset.unit === S.unit));
-    save(); updateLoadUI(); buildLifter(); updateYou(); if (S.tab === 'adjust') buildCompare(); if (S.mode === 'compare') buildComparePanel(); else buildStory(); dirty = true;
+    save(); updateLoadUI(); buildLifter(); updateYou(); if (S.tab === 'adjust') buildCompare(); if (S.mode === 'compare') buildComparePanel(); else buildStory(); markDirty();
   });
   const stepLoad = (d) => {
     const rg = rangeOf(S.lift);
@@ -12564,7 +12592,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const rc = sv.getBoundingClientRect();
     S.u = clamp((e.clientX - rc.left) / rc.width, 0, 0.999); S.playing = false; updatePlay();
     if (S.selJoint !== sv.dataset.j) selectJoint(sv.dataset.j);
-    dirty = true;
+    markDirty();
   };
   $('jList').addEventListener('pointerdown', sparkScrub);
   $('jList').addEventListener('pointermove', (e) => { if (e.buttons || e.pointerType === 'touch') sparkScrub(e); });
@@ -13189,7 +13217,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     rep = cmpRep.a;
     buildVerdict(); buildScore(); buildFly(); if (S.tab === 'joints') buildCJoints();
     buildStory();
-    dirty = true;
+    markDirty();
   }
   const pctTxt = (r) => Math.round(Math.abs(r) * 100) + '%';
   function buildVerdict() {
@@ -13283,7 +13311,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const lo = Math.min(rgA.minKg, rgB.minKg), hi = Math.max(rgA.maxKg, rgB.maxKg, 400);
     if (S.cmp.link === 'kg') S.cmp.kg = clamp(S.unit === 'kg' ? fmtLoad(S.cmp.kg, S.cmp.a.lift) + d * rgA.stepKg : (fmtLoad(S.cmp.kg, S.cmp.a.lift) + d * rgA.stepLb) / KG_LB, lo, hi);
     else S.cmp.pct = clamp(Math.round(S.cmp.pct * 100 + d * 5) / 100, 0.3, 1.1);
-    buildSides(); dirty = true;
+    buildSides(); markDirty();
     clearTimeout(cTimer); cTimer = setTimeout(buildComparePanel, 180);
   }
   let cTimer = 0;
@@ -13295,7 +13323,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     else S.cmp.pct = clamp(Math.round((loadFor('a') / Math.max(1e-3, refLoadFor(S.cmp.a.lift).kg)) * 20) / 20, 0.3, 1.1);
     S.cmp.link = b.dataset.link; buildComparePanel();
   });
-  $('cView').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.cmp.overlay = b.dataset.view === 'overlay'; buildSides(); resize(); setCamFor(camLift(), false); dirty = true; });
+  $('cView').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; S.cmp.overlay = b.dataset.view === 'overlay'; buildSides(); resize(); setCamFor(camLift(), false); markDirty(); });
 
   // pickers: one dialog for A or B, one for the ready-made pairs, one for all movements, one sheet for your body
   let popSide = 'a', lastFocus = null;
@@ -13611,7 +13639,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   function seekBeat(k) {
     const b = story.beats[k]; if (!b) return;
     S.u = b.u; S.playing = false; updatePlay(); $('scrub').value = Math.round(S.u * 1000);
-    if (b.focus) selectRow(b.focus, true, true); else dirty = true;
+    if (b.focus) selectRow(b.focus, true, true); else markDirty();
     shownBeat = -2;
   }
   $('feed').addEventListener('click', (e) => { const li = e.target.closest('li'); if (li) seekBeat(+li.dataset.k); });
@@ -13788,7 +13816,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     function frame() {
       if (!on()) return;
       const h = stage.clientHeight || H(), top = barBottom() + 34, bottom = shown - 84, band = Math.max(190, bottom - top);
-      R.cam.hf = R2.cam.hf = band / h; R.cam.cyf = R2.cam.cyf = (top + band * 0.5) / h; dirty = true;
+      R.cam.hf = R2.cam.hf = band / h; R.cam.cyf = R2.cam.cyf = (top + band * 0.5) / h; markDirty();
     }
     function follow(to, instant) {
       cancelAnimationFrame(anim);
@@ -13923,13 +13951,43 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     return { on, det: () => det, snap, frame, sync, init };
   })();
   function tick(t) {
+    rafId = 0;
+    if (document.hidden) { lastT = 0; return; }
     phone.sync();
-    const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+    const now = performance.now();
+    const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+    const isSoft = !!(L.GL && L.GL.isSoftware);
+    const layerMoving = !railDrag && Math.abs(S.layer - S.layerTo) > 1e-3;
+
+    // Power-saving auto-pause: stop burning GPU/CPU if left playing in an unfocused window (20s) or idle tab (120s)
+    if (S.playing) {
+      if (!focused) {
+        if (!blurAt) blurAt = now;
+        if (now - blurAt > 20000) { S.playing = false; blurPaused = true; updatePlay(); }
+      } else {
+        blurAt = 0;
+        if (now - lastActT > 120000) { S.playing = false; updatePlay(); }
+      }
+    }
+
+    // Pace passive playback (30 fps focused hardware, 8 fps unfocused, 10 fps software WebGL)
+    // while keeping interactive drag/orbit/scrub/glide at full native refresh rate!
+    const interactive = _dirty || !!camTo || layerMoving;
+    if (!interactive && S.playing) {
+      const minMs = isSoft ? 100 : (!focused ? 125 : 33);
+      if (t - lastDrawT < minMs) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+    }
+
+    const dt = lastT ? Math.min(0.15, (t - lastT) / 1000) : 0;
+    lastT = t;
     let moving = false;
-    if (S.playing && !document.hidden) { S.u = (S.u + (dt * S.speed) / repT()) % 1; flowT += dt * (0.4 + 0.6 * S.speed); moving = true; }
-    if (!railDrag && Math.abs(S.layer - S.layerTo) > 1e-3) { const st = dt * 1.15; S.layer += clamp(S.layerTo - S.layer, -st, st); moving = true; }
+    if (S.playing) { S.u = (S.u + (dt * S.speed) / repT()) % 1; flowT += dt * (0.4 + 0.6 * S.speed); moving = true; }
+    if (layerMoving) { const st = Math.min(0.05, dt || 0.016) * 1.15; S.layer += clamp(S.layerTo - S.layer, -st, st); moving = true; }
     if (camTo) {
-      const k = 1 - Math.exp(-dt * 7), c = R.cam;
+      const k = 1 - Math.exp(-Math.min(0.05, dt || 0.016) * 7), c = R.cam;
       let dy = camTo.yaw - c.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
       c.yaw += dy * k; c.pitch += (camTo.pitch - c.pitch) * k; c.zoom += (camTo.zoom - c.zoom) * k;
       const o = c.off || (c.off = [0, 0, 0]), to = camTo.off || [0, 0, 0];
@@ -13939,9 +13997,30 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       }
       moving = true;
     }
-    if ((moving || dirty) && body && !cfgDirty) { dirty = false; draw(); }
-    requestAnimationFrame(tick);
+    if ((moving || _dirty) && body && !cfgDirty) { _dirty = false; lastDrawT = t; draw(); }
+    const needMore = S.playing || !!camTo || (!railDrag && Math.abs(S.layer - S.layerTo) > 1e-3) || _dirty;
+    if (needMore && !document.hidden) rafId = requestAnimationFrame(tick);
+    else lastT = 0;
   }
+
+  // Power & visibility lifecycle: 0% CPU/GPU on hidden tabs, auto-resume on focus if paused by blur
+  const noteActivity = () => { lastActT = performance.now(); blurAt = 0; if (blurPaused) blurPaused = false; };
+  for (const ev of ['pointerdown', 'wheel', 'keydown', 'input', 'touchstart']) document.addEventListener(ev, noteActivity, { passive: true, capture: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      lastT = 0;
+    } else {
+      lastActT = performance.now(); blurAt = 0;
+      if (blurPaused) { blurPaused = false; S.playing = true; updatePlay(); }
+      markDirty();
+    }
+  });
+  window.addEventListener('focus', () => {
+    lastActT = performance.now(); blurAt = 0;
+    if (blurPaused) { blurPaused = false; S.playing = true; updatePlay(); wake(); }
+  });
+  window.addEventListener('blur', () => { blurAt = performance.now(); });
 
   // ---------------- boot ----------------
   function start(st) {
@@ -13960,15 +14039,19 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     updateYou();
     setMode(S.mode);
     if (window.ResizeObserver) { const ro = new ResizeObserver(resize); ro.observe(stage); ro.observe(document.body); } else window.addEventListener('resize', resize);
-    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { R.font = R2.font = getComputedStyle(document.body).fontFamily; cullPhaseLabels(); dirty = true; });
-    if (!RM && S.layer < 1) setTimeout(() => { S.layerTo = 2; }, 650);
-    requestAnimationFrame(tick);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { R.font = R2.font = getComputedStyle(document.body).fontFamily; cullPhaseLabels(); markDirty(); });
+    if (!RM && S.layer < 1) setTimeout(() => { S.layerTo = 2; wake(); }, 650);
+    if (L.GL && L.GL.onReady) {
+      const onGL = () => { resize(); markDirty(); };
+      if (L.GL.ready) onGL(); else L.GL.onReady.push(onGL);
+    }
+    wake();
     phone.init();
   }
   const hot = window.claude && window.claude.hot;
   if (hot && hot.snapshot) hot.snapshot(() => ({ lift: S.lift, variant: S.variant, load: S.load, tab: S.tab, mode: S.mode, cmp: S.cmp, paint: S.paint }));
   if (hot && hot.ready) hot.ready(start); else start((hot && hot.data) || {});
-  window.__lab = { setCam: (o) => { camTo = null; Object.assign(R.cam, o); dirty = true; }, S, R, R2, setLift, setTab, setVariant, selectRow, selectJoint, setMode, setPair, buildComparePanel, draw: () => { dirty = true; } };
+  window.__lab = { setCam: (o) => { camTo = null; Object.assign(R.cam, o); markDirty(); }, S, R, R2, setLift, setTab, setVariant, selectRow, selectJoint, setMode, setPair, buildComparePanel, draw: () => { markDirty(); }, _rafActive: () => !!rafId };
 })();
 
 </script>
