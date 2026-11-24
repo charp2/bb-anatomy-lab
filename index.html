@@ -138,13 +138,15 @@ button{-webkit-tap-highlight-color:transparent}
 .caption b{font-weight:700}
 .caption .cta{color:var(--chalk)}.caption .ctb{color:var(--force)}
 .caption.fade{opacity:0}
-.pick{position:absolute;left:10px;right:96px;top:auto;bottom:106px;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;padding:7px 36px 7px 11px;border-radius:10px;background:rgba(11,25,32,.94);border:1px solid var(--line);font-size:13.5px;line-height:1.3;z-index:2}
+.pick{position:absolute;left:10px;right:96px;top:auto;bottom:106px;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;padding:7px 38px 7px 11px;border-radius:10px;background:rgba(11,25,32,.94);border:1px solid var(--line);font-size:13.5px;line-height:1.3;z-index:2}
 .pick .sw{width:10px;height:10px;border-radius:50%;flex:none}
 .pick .pn{font-weight:600}
 .pick .pv{font-variant-numeric:tabular-nums}
 .pick .ps{color:var(--muted);flex:1;min-width:90px}
-.pick #pickClose{position:absolute;top:4px;right:4px;border:0;background:none;color:var(--muted);font-size:22px;line-height:1;width:32px;height:32px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center}
-.pick .pstack{flex-basis:100%;display:flex;align-items:center;gap:5px;overflow-x:auto;scrollbar-width:none;padding:5px 2px 1px 0;border-top:1px solid var(--line2);margin-top:2px;margin-right:-25px}
+.pick .pacts{position:absolute;top:4px;right:4px;display:flex;align-items:center;gap:2px}
+.pick #pickClose{border:0;background:none;color:var(--muted);font-size:22px;line-height:1;width:32px;height:32px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;border-radius:8px}
+.pick #pickClose:hover{color:var(--chalk);background:rgba(233,239,236,.08)}
+.pick .pstack{flex-basis:100%;display:flex;align-items:center;gap:5px;overflow-x:auto;scrollbar-width:none;padding:5px 2px 1px 0;border-top:1px solid var(--line2);margin-top:2px;margin-right:-27px}
 .pick .pstack::-webkit-scrollbar{display:none}
 .pick .pstack[hidden]{display:none}
 .pick .pslbl{flex:none;font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.02em;padding-right:2px;white-space:nowrap}
@@ -152,10 +154,12 @@ button{-webkit-tap-highlight-color:transparent}
 .pick .pchip i{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
 .pick .pchip[aria-pressed="true"]{background:var(--raise);border-color:var(--force);color:var(--chalk);font-weight:600}
 .pick .pchip:hover{color:var(--chalk);border-color:rgba(233,239,236,.35)}
-.app.m .pick{gap:3px 6px;padding:6px 34px 6px 10px;font-size:13px}
+.app.m .pick{gap:3px 6px;padding:7px 72px 7px 10px;font-size:13px}
+.app.m .pick:has(#pickWhy[hidden]){padding-right:38px}
 .app.m .pick .pn{flex:1 1 calc(100% - 20px);min-width:0}
 .app.m .pick .ps{min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.app.m .pick .pstack{margin-right:-24px;padding:4px 4px 1px 0}
+.app.m .pick .pstack{margin-right:-62px;padding:4px 4px 1px 0}
+.app.m .pick:has(#pickWhy[hidden]) .pstack{margin-right:-28px}
 .app.m .pick .pchip{min-height:30px;padding:4px 9px;font-size:11.5px}
 /* muscles quick search */
 .msearch{position:relative;display:flex;align-items:center}
@@ -568,8 +572,10 @@ p.warn{margin:0 0 10px;padding:8px 10px;border-left:3px solid var(--warn);backgr
 .msheet .toolbar .tbtn.dot::before{left:16px}
 
 /* zoom: gestures first, buttons for everyone else */
-#cv,#cv2{touch-action:pan-y}
-.app.m #cv,.app.m #cv2{touch-action:none}
+#cv,#cv2{touch-action:pan-y;cursor:grab}
+#cv.orbiting,#cv2.orbiting{cursor:grabbing}
+#cv.panning,#cv2.panning{cursor:move}
+.app.m #cv,.app.m #cv2{touch-action:none;cursor:default}
 .zoom{position:absolute;z-index:5;right:12px;bottom:64px;display:flex;flex-direction:column;border-radius:12px;overflow:hidden;background:var(--material);-webkit-backdrop-filter:saturate(160%) blur(18px);backdrop-filter:saturate(160%) blur(18px);box-shadow:inset 0 0 0 .5px rgba(233,239,236,.18)}
 .zbtn{width:40px;height:40px;border:0;background:none;color:var(--chalk);display:flex;align-items:center;justify-content:center;cursor:pointer}
 .zbtn[hidden]{display:none}
@@ -658,9 +664,13 @@ table.ev tr.ok td:last-child{color:var(--force)}
 .pwhy .tgo{background:rgb(58,76,214)}
 .pwhy .tgi{background:rgb(66,156,74)}
 .pick .pmore{display:none}
-.app.m .pick .pmore{display:inline-block;border:1px solid var(--line);background:none;color:var(--chalk);border-radius:12px;font-size:12px;font-weight:600;padding:3px 10px;margin-left:auto;cursor:pointer}
+.app.m .pick .pmore{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:1px solid var(--line);background:rgba(233,239,236,.06);color:var(--chalk);border-radius:8px;cursor:pointer;flex:none}
+.app.m .pick .pmore svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;transition:transform .22s ease}
+.app.m .pick.open .pmore svg{transform:rotate(180deg)}
+.app.m .pick.open .pmore{border-color:var(--force);color:var(--force);background:rgba(143,227,240,.1)}
 .app.m .pick:not(.open) .pwhy{display:none}
 .app.m .pick:has(#pickWhy[hidden]) .pmore{display:none}
+.app.m .pick .pwhy{margin-right:-62px;padding:4px 6px 2px 14px}
 
 </style>
 </head>
@@ -723,7 +733,7 @@ table.ev tr.ok td:last-child{color:var(--force)}
           <button type="button" class="mround" id="mYou" aria-haspopup="dialog" aria-label="You: body and maxes"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M4.8 19.5c1.2-3.6 4-5.3 7.2-5.3s6 1.7 7.2 5.3"/></svg><span class="typdot" hidden></span></button>
         </div>
         <button type="button" class="mround mview m-only" id="mView" aria-haspopup="dialog" aria-label="View options"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
-        <canvas id="cv" aria-label="Drag to rotate. Tap a muscle or a joint to inspect it."></canvas>
+        <canvas id="cv" aria-label="Drag to rotate, right-drag or Shift-drag to pan, scroll to zoom. Tap a muscle or a joint to inspect it."></canvas>
         <canvas id="cv2" aria-label="Second lifter, same view. Drag to rotate both." hidden></canvas>
         <div class="tag tagA only-compare" id="tagA"></div>
         <div class="tag tagB only-compare" id="tagB"></div>
@@ -748,8 +758,10 @@ table.ev tr.ok td:last-child{color:var(--force)}
           <span class="pn" id="pickName"></span>
           <span class="pv" id="pickVal"></span>
           <span class="ps" id="pickState"></span>
-          <button type="button" class="pmore" id="pickMore" aria-expanded="false">Details</button>
-          <button type="button" id="pickClose" aria-label="Clear selection">×</button>
+          <span class="pacts">
+            <button type="button" class="pmore" id="pickMore" aria-expanded="false" aria-label="Show details" title="Show details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+            <button type="button" id="pickClose" aria-label="Clear selection" title="Clear selection">×</button>
+          </span>
           <div class="pstack" id="pickStack" role="group" aria-label="Muscles under this spot" hidden></div>
           <div class="pwhy" id="pickWhy" hidden></div>
         </div>
@@ -7560,10 +7572,14 @@ table.ev tr.ok td:last-child{color:var(--force)}
   const local = (el, e) => { const rc = el.getBoundingClientRect(); return [e.clientX - rc.left, e.clientY - rc.top]; };
   const ptrs = new Map(); let drag = null, pinch = null;
   const onDown = (e) => {
+    if (e.button === 1) e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, yaw: R.cam.yaw, pitch: R.cam.pitch, moved: 0, t: performance.now(), type: e.pointerType };
-    else if (ptrs.size === 2) {
+    if (ptrs.size === 1) {
+      const panMode = e.pointerType === 'mouse' && (e.button === 2 || e.button === 1 || e.shiftKey);
+      drag = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: R.cam.yaw, pitch: R.cam.pitch, moved: 0, t: performance.now(), type: e.pointerType, btn: e.button, pan: panMode };
+      if (e.pointerType === 'mouse') { e.currentTarget.classList.toggle('panning', panMode); e.currentTarget.classList.toggle('orbiting', !panMode); }
+    } else if (ptrs.size === 2) {
       const p = [...ptrs.values()];
       pinch = { d: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y), mx: (p[0].x + p[1].x) / 2, my: (p[0].y + p[1].y) / 2 };
       drag = null; endPtr.lastTap = 0;
@@ -7576,10 +7592,15 @@ table.ev tr.ok td:last-child{color:var(--force)}
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.moved = Math.max(drag.moved, Math.hypot(dx, dy));
       if (drag.moved > 4) {
-        camTo = null; if (viewName) { viewName = null; buildViews(); }
-        R.cam.yaw = drag.yaw - dx * 0.0085; R.cam.pitch = clamp(drag.pitch + dy * 0.006, rad(-12), rad(88));
-        dirty = true;
+        if (drag.pan) {
+          panBy(rrOf(e.currentTarget), e.clientX - drag.lx, e.clientY - drag.ly);
+        } else {
+          camTo = null; if (viewName) { viewName = null; buildViews(); }
+          R.cam.yaw = drag.yaw - dx * 0.0085; R.cam.pitch = clamp(drag.pitch + dy * 0.006, rad(-12), rad(88));
+          dirty = true;
+        }
       }
+      drag.lx = e.clientX; drag.ly = e.clientY;
     } else if (ptrs.size === 2 && pinch) {
       const el = e.currentTarget, rr = rrOf(el), rc = el.getBoundingClientRect();
       const p = [...ptrs.values()], d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y), mx = (p[0].x + p[1].x) / 2, my = (p[0].y + p[1].y) / 2;
@@ -7592,8 +7613,8 @@ table.ev tr.ok td:last-child{color:var(--force)}
     const was = drag;
     ptrs.delete(e.pointerId);
     if (ptrs.size < 2) pinch = null;
-    if (ptrs.size === 0) drag = null;
-    if (e.type === 'pointerup' && was && was.moved < 6 && performance.now() - was.t < 500) {
+    if (ptrs.size === 0) { drag = null; e.currentTarget.classList.remove('panning', 'orbiting'); }
+    if (e.type === 'pointerup' && was && was.moved < 6 && performance.now() - was.t < 500 && (was.type !== 'mouse' || (was.btn === 0 && !was.pan))) {
       const el = e.currentTarget, rr = rrOf(el), [lx, ly] = local(el, e);
       const now = performance.now();
       if (was.type !== 'mouse' && now - (endPtr.lastTap || 0) < 320 && Math.hypot(e.clientX - endPtr.tx, e.clientY - endPtr.ty) < 40) {
@@ -7623,6 +7644,7 @@ table.ev tr.ok td:last-child{color:var(--force)}
   for (const el of [cv, cv2]) {
     el.addEventListener('pointerdown', onDown); el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', endPtr); el.addEventListener('pointercancel', endPtr);
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('dblclick', (e) => { const [lx, ly] = local(el, e); if (R.cam.zoom > 1.8) resetView(); else zoomTo(2.4, rrOf(el), lx, ly); });
     // two fingers belong to the lifter, never to the page: stop the browser panning or zooming the page
     el.addEventListener('touchstart', (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
@@ -8096,8 +8118,15 @@ table.ev tr.ok td:last-child{color:var(--force)}
     S.u = +b.dataset.u; S.playing = false; updatePlay(); $('scrub').value = Math.round(S.u * 1000); selectRow(b.dataset.row, true, true);
   });
   $('nudgeGo').addEventListener('click', () => openWelcome());
-  // on a phone the selection card stays one line so the atlas view keeps the stage; Details opens the rest
-  $('pickMore').addEventListener('click', () => { const o = !$('pick').classList.contains('open'); $('pick').classList.toggle('open', o); $('pickMore').setAttribute('aria-expanded', o); $('pickMore').textContent = o ? 'Less' : 'Details'; });
+  // on a phone the selection card stays compact so the atlas view keeps the stage; the chevron opens/closes details
+  $('pickMore').addEventListener('click', () => {
+    const o = !$('pick').classList.contains('open');
+    $('pick').classList.toggle('open', o);
+    const b = $('pickMore');
+    b.setAttribute('aria-expanded', o);
+    b.setAttribute('aria-label', o ? 'Hide details' : 'Show details');
+    b.title = o ? 'Hide details' : 'Show details';
+  });
   $('mMax').addEventListener('click', (e) => { if (e.target.closest('[data-go=maxes]')) { closePops(); openWelcome(); } });
   $('welcome').addEventListener('click', (e) => { if (e.target === $('welcome')) $('welcome').hidden = true; });
   function updateYou() {
