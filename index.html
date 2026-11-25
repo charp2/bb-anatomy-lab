@@ -1144,7 +1144,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
 /* body: movement-agnostic anthropometry, 17-segment kinematic tree, frame builders, and mass model */
 (function (root) {
   const LAB = (root.LAB = root.LAB || {});
-  const { V, M, clamp, lerp, smooth, rad, toW } = LAB;
+  const { V, M, clamp, lerp, smooth, rad, toW, ik2 } = LAB;
   const G = 9.81;
   // Segment mass fractions (Winter, Biomechanics and Motor Control of Human Movement, 4th ed.)
   const MASS = { foot: 0.0145, shank: 0.0465, thigh: 0.1, pelvis: 0.142, abdomen: 0.139, thorax: 0.216, head: 0.081, uarm: 0.028, farm: 0.016, hand: 0.006 };
@@ -1273,6 +1273,101 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     return best;
   }
 
+  // C-infinity smooth upper bound: always >= max(a, b), with bounded 1st & 2nd derivatives
+  // so inverse-dynamics horizontal acceleration d2x/dt2 never spikes on contact transitions.
+  function smax(a, b, k) {
+    const d = a - b;
+    return 0.5 * (a + b + Math.sqrt(d * d + k * k));
+  }
+
+  // General rigid-body anterior body-envelope vs horizontal barbell clearance solver.
+  // Returns a C-infinity smooth minimum world X for a horizontal barbell center at height yBar (radius BAR_R)
+  // so the bar shaft can NEVER penetrate shins, knees/patella, thighs/quads, pelvis, abdomen,
+  // chest/pecs, or head/face for any posture, height, mass, or custom limb proportions.
+  const PELVIS_ANT = [[0.108, -0.04], [0.124, 0.04], [0.132, 0.105]];
+  const LUMBAR_ANT = [[0.134, 0.0], [0.156, 0.085], [0.168, 0.17]];
+  function bodyBarMinX(f, J, body, yBar, opts) {
+    opts = opts || {};
+    const s = body.s, g = body.girth, ts = body.ts;
+    const rBar = (opts.barR != null ? opts.barR : BAR_R) + (opts.margin != null ? opts.margin : 0.006 * s);
+    const candidates = [];
+
+    // Exact analytical C-infinity smooth anterior envelope of a tilted tapered capsule (pA,rA)->(pB,rB) at height yBar.
+    // The rightmost point of the circle centered at (x(t), y(t)) intersecting y=yBar is maximized analytically at
+    // y(t*) = yBar - r * (dx / L) (where the capsule normal tilts into +X), smoothly clamped to [0, 1].
+    const testCapsule = (pA, pB, rA, rB) => {
+      if (!pA || !pB) return;
+      const dx = pB[0] - pA[0], dy = pB[1] - pA[1];
+      const L = Math.hypot(dx, dy);
+      if (L < 1e-5) return;
+      const rMid = 0.5 * (rA + rB) + rBar;
+      const yTarget = yBar - rMid * (dx / L) * (dy >= 0 ? 1 : -1);
+      const tRaw = Math.abs(dy) > 1e-4 ? (yTarget - pA[1]) / dy : 0.5;
+      const t = 0.5 * (Math.sqrt(tRaw * tRaw + 0.0025) - Math.sqrt((tRaw - 1) * (tRaw - 1) + 0.0025) + 1);
+      const cx = pA[0] + dx * t;
+      const cy = pA[1] + dy * t;
+      const cr = lerp(rA, rB, clamp(t, 0, 1)) + rBar;
+      const distY = Math.abs(yBar - cy);
+      if (distY < cr + 0.045 * s) {
+        const q = cr * cr - distY * distY;
+        const radX = Math.sqrt(0.5 * (q + Math.sqrt(q * q + 1e-6)));
+        const fade = 1 - smooth(cr * 0.90, cr + 0.040 * s, distY);
+        candidates.push(cx + radX * fade - (1 - fade) * 0.25 * s);
+      }
+    };
+    if (J && J.A && J.K && J.A.R && J.K.R) {
+      testCapsule(J.A.R, J.K.R, 0.045 * s * g, 0.064 * s * g);
+    }
+    if (J && J.K && J.H && J.K.R && J.H.R) {
+      testCapsule(J.K.R, J.H.R, 0.064 * s * g, 0.092 * s * g);
+    }
+
+    // Combine per-group anterior surface curves using pairwise smax (zero LogSumExp ln(N) vertex-overlap bump!).
+    // Each polyline evaluates at most ONE world X at yBar by linear interpolation along its continuous segments.
+    const kSmooth = 0.008 * s;
+    const evalPolyX = (W) => {
+      let best = null;
+      for (let i = 1; i < W.length; i++) {
+        const a = W[i - 1], b = W[i];
+        const yLo = Math.min(a[1], b[1]), yHi = Math.max(a[1], b[1]);
+        if (yBar < yLo - rBar - 0.03 * s || yBar > yHi + rBar + 0.03 * s) continue;
+        const dy = b[1] - a[1];
+        const u = Math.abs(dy) < 1e-5 ? 0.5 : clamp((yBar - a[1]) / dy, 0, 1);
+        const px = lerp(a[0], b[0], u);
+        const py = lerp(a[1], b[1], u);
+        const dVert = Math.abs(yBar - py);
+        const fade = 1 - smooth(rBar * 0.85, rBar + 0.028 * s, dVert);
+        const val = px + rBar * fade - (1 - fade) * 0.25 * s;
+        if (best == null || val > best) best = val;
+      }
+      return best;
+    };
+
+    // Single continuous anterior trunk contour (pelvis -> lumbar/abdomen -> thorax/chest)
+    const trunkPts = [];
+    if (f.pelvis) for (const q of PELVIS_ANT) trunkPts.push(toW(f.pelvis, [q[0] * s * g, q[1] * s, 0]));
+    if (f.lumbar) for (const q of LUMBAR_ANT) trunkPts.push(toW(f.lumbar, [q[0] * s * g, q[1] * s * ts, 0]));
+    if (f.thorax) {
+      for (const q of CHEST) {
+        if (opts.chestMaxY != null && q[0] > opts.chestMaxY) continue;
+        trunkPts.push(toW(f.thorax, [q[1] * s * g, q[0] * s * ts, 0]));
+      }
+    }
+    const xTrunk = evalPolyX(trunkPts);
+    if (xTrunk != null) candidates.push(xTrunk);
+
+    if (opts.includeHead !== false && f.head) {
+      const headPts = FACE.map((q) => toW(f.head, [q[0] * s, q[1] * s, 0]));
+      const xHead = evalPolyX(headPts);
+      if (xHead != null) candidates.push(xHead);
+    }
+
+    if (!candidates.length) return null;
+    let out = candidates[0];
+    for (let i = 1; i < candidates.length; i++) out = smax(out, candidates[i], kSmooth);
+    return out;
+  }
+
   // Sideways bar force / vertical by grip width in biacromial widths (Larsen 2021)
   function mlRatio(g) {
     if (g >= 1.4) return -0.011 + ((g - 1.4) * (0.144 + 0.011)) / 0.3;
@@ -1321,40 +1416,104 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   const ghWorld = (f, body, sd) => toW(f['scap' + sd], [body.GH[0], body.GH[1], sideOf(sd) * body.GH[2]]);
   function wristOf(body, E, Gp) { return V.lerp(E, Gp, body.Lfa / (body.Lfa + body.Lgrip)); }
 
-  // 1-DOF reachable-circle elbow solver for pressing (preserves stacked forearms unless flare/tuck explicitly deviates)
+  // Generalized smooth variational 1-DOF elbow swivel solver for pressing.
+  // Eliminates acos branch-cut snaps, wide-grip lockout whips, and excessive forward forearm tilt
+  // by minimizing a smooth continuous energy on the IK elbow circle E(phi):
+  //   1) Bilateral forearm stacking under the bar (weighted naturally by sin^2(flex) = (h/a)^2 so it yields
+  //      smoothly to the anatomical tuck plane near lockout instead of snapping)
+  //   2) Anatomical humeral abduction/tuck plane preference (tuckRad)
+  //   3) Soft superior-impingement barrier (prevents elbow from kicking past shoulder toward head/ears)
   function solveBenchElbow(S, Gp, a, b, Rt, sg, tuckRad, pole, fallback, flareW) {
-    const d = V.dist(S, Gp); if (d >= a + b - 1e-3 || d < 1e-6) return fallback;
-    const u = V.mul(V.sub(Gp, S), 1 / d), x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x));
+    const d = V.dist(S, Gp);
+    if (d >= a + b - 1e-3 || d < 1e-6) return fallback;
+    const u = V.mul(V.sub(Gp, S), 1 / d);
+    const x = (a * a - b * b + d * d) / (2 * d);
+    const h = Math.sqrt(Math.max(0, a * a - x * x));
     if (h < 1e-4) return fallback;
-    const C = V.addm(S, u, x), e1 = V.norm(V.perp(pole, u)), e2 = V.cross(u, e1);
-    const wrap = (q) => Math.atan2(Math.sin(q), Math.cos(q));
-    const at = (q) => V.add(V.mul(e1, Math.cos(q)), V.mul(e2, Math.sin(q)));
-    // 1) Stacked-forearm elbow (E.z = G.z, keeping the branch toward the feet for continuity)
-    const Az = h * e1[2], Bz = h * e2[2], Rz = Math.hypot(Az, Bz), tz = Gp[2] - C[2];
-    let phS = 0;
-    if (Rz > 1e-6) {
-      const ph0 = Math.atan2(Bz, Az), rr = clamp(tz / Rz, -1, 1);
-      const dph = Math.acos(rr) * smooth(0, 1, (1 - Math.abs(rr)) / 0.12);
-      const p1 = wrap(ph0 + dph), p2 = wrap(ph0 - dph);
-      const pref = M.ap(Rt, [0, -1, 0]);
-      phS = V.dot(at(p1), pref) >= V.dot(at(p2), pref) ? p1 : p2;
+    const C = V.addm(S, u, x);
+    const pPerp = V.perp(pole, u);
+    const e1 = V.len(pPerp) > 1e-5 ? V.norm(pPerp) : V.norm(V.perp(M.ap(Rt, [0, -1, 0]), u));
+    const e2 = V.cross(u, e1);
+    const yTh = M.col(Rt, 1); // thorax superior axis (toward head)
+    const zTh = M.col(Rt, 2); // thorax lateral axis (+Z)
+    // Scale stacking weight smoothly with elbow bend (h/a)^2 so as the arm nears lockout,
+    // the elbow glides monotonically along the anatomical tuck plane with zero snap.
+    const bendW = clamp((h / a) * (h / a) * 2.2, 0, 1);
+    const stackScale = (1 - clamp(flareW || 0, 0, 1)) * bendW;
+    // Slight preference for vertical forearm in Z (bar stacking) balanced with X (no 15 cm forward kick),
+    // plus continuous tuck-plane alignment and a soft barrier against kicking above shoulder toward ears.
+    const wZ = 2.6 * stackScale;
+    const wX = 1.15 * stackScale;
+    const wTuck = 0.42 + 2.4 * clamp(flareW || 0, 0, 1);
+    const wHead = 4.0;
+    const a2 = a * a;
+    const targetSin = Math.sin(tuckRad);
+    const targetCos = Math.cos(tuckRad);
+
+    const energy = (ph) => {
+      const cp = Math.cos(ph), sp = Math.sin(ph);
+      const ex = C[0] + h * (e1[0] * cp + e2[0] * sp);
+      const ey = C[1] + h * (e1[1] * cp + e2[1] * sp);
+      const ez = C[2] + h * (e1[2] * cp + e2[2] * sp);
+      const dx = ex - Gp[0];
+      const dz = ez - Gp[2];
+      // Humeral direction in thorax YZ plane for tuck-angle error
+      const rx = ex - S[0], ry = ey - S[1], rz = ez - S[2];
+      const rSup = rx * yTh[0] + ry * yTh[1] + rz * yTh[2];
+      const rLat = (rx * zTh[0] + ry * zTh[1] + rz * zTh[2]) * sg;
+      const tuckErr = (rSup * targetSin + rLat * targetCos); // 0 when humerus sits in exact tuckRad plane
+      const headPen = Math.max(0, rSup + 0.015 * a);         // penalize elbow going superior (toward head/ears)
+      // Also softly prefer the anatomical pole hemisphere (cos(ph) > 0) so we never flip across the circle
+      const polePen = 0.06 * a2 * (1 - cp);
+      return wZ * dz * dz + wX * dx * dx + wTuck * tuckErr * tuckErr + wHead * headPen * headPen + polePen;
+    };
+
+    // Global 16-point scan + golden-section refinement on [-pi, pi]: zero branch cuts, C-inf smooth
+    let bestPh = 0, bestE = 1e9;
+    const NS = 16;
+    for (let i = 0; i < NS; i++) {
+      const ph = -Math.PI + (2 * Math.PI * i) / NS;
+      const ev = energy(ph);
+      if (ev < bestE) { bestE = ev; bestPh = ph; }
     }
-    let ph = phS;
-    if (flareW > 1e-4) {
-      // 2) Exact requested humerus flare angle in thorax YZ plane
-      const n = M.ap(Rt, [0, Math.sin(tuckRad), Math.cos(tuckRad) * sg]);
-      const c0 = V.dot(V.sub(C, S), n);
-      const An = h * V.dot(e1, n), Bn = h * V.dot(e2, n), Rn = Math.hypot(An, Bn);
-      if (Rn > 1e-6) {
-        const ph0 = Math.atan2(Bn, An), rr = clamp(-c0 / Rn, -1, 1);
-        const dph = Math.acos(rr) * smooth(0, 1, (1 - Math.abs(rr)) / 0.12);
-        const p1 = wrap(ph0 + dph), p2 = wrap(ph0 - dph);
-        const phF = V.dot(at(p1), pole) >= V.dot(at(p2), pole) ? p1 : p2;
-        ph = wrap(phS + wrap(phF - phS) * flareW);
-      }
+    let lo = bestPh - (2 * Math.PI) / NS, hi = bestPh + (2 * Math.PI) / NS;
+    const gr = 0.61803398875;
+    let x1 = hi - gr * (hi - lo), x2 = lo + gr * (hi - lo);
+    let f1 = energy(x1), f2 = energy(x2);
+    for (let it = 0; it < 12; it++) {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - gr * (hi - lo); f1 = energy(x1); }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + gr * (hi - lo); f2 = energy(x2); }
     }
-    ph *= smooth(0.25, 0.5, h / a);
-    return V.add(C, V.mul(at(ph), h));
+    const phOpt = 0.5 * (lo + hi);
+    return [
+      C[0] + h * (e1[0] * Math.cos(phOpt) + e2[0] * Math.sin(phOpt)),
+      C[1] + h * (e1[1] * Math.cos(phOpt) + e2[1] * Math.sin(phOpt)),
+      C[2] + h * (e1[2] * Math.cos(phOpt) + e2[2] * Math.sin(phOpt)),
+    ];
+  }
+
+  // Generalized extended-wrist front-rack arm IK (shared by front squat, power clean catch/rack, etc.).
+  // Models real wrist extension (~65-75 deg) when rackW -> 1 so the wrist W sits forward & slightly below
+  // the bar G (leaving Lfa = 0.26 m < Lh = 0.30 m), preventing the straight-wrist triangle singularity that
+  // otherwise forces elbows medially across the chest/midline.
+  function solveRackArm(body, f, sd, S, G, pole, rackW) {
+    const rw = clamp(rackW || 0, 0, 1);
+    const sg = sideOf(sd);
+    if (rw < 1e-4) {
+      const ik = ik2(S, G, body.Lh, body.Lfa + body.Lgrip, pole);
+      return { E: ik.mid, W: wristOf(body, ik.mid, G), G };
+    }
+    // Straight-wrist baseline
+    const ik0 = ik2(S, G, body.Lh, body.Lfa + body.Lgrip, pole);
+    const W0 = wristOf(body, ik0.mid, G);
+    // Extended-wrist target in thorax coordinates: wrist sits forward (+X) & slightly below (-Y) the bar,
+    // staying just outside shoulder width so forearms stay roughly parallel instead of crossing inward.
+    const wOffTh = [0.88 * body.Lgrip, -0.34 * body.Lgrip, sg * 0.14 * body.Lgrip];
+    const W1 = V.add(G, M.ap(f.thorax.R, wOffTh));
+    const W = [lerp(W0[0], W1[0], rw), lerp(W0[1], W1[1], rw), lerp(W0[2], W1[2], rw)];
+    // Solve humerus (Lh) + forearm (Lfa) to the extended wrist W
+    const ikR = ik2(S, W, body.Lh, body.Lfa, pole);
+    return { E: ikR.mid, W, G };
   }
 
   // Generalized limb frame builder.
@@ -1398,15 +1557,47 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
           const td = V.norm(tPerp);
           const cosA = V.dot(td, V.mul(zf, sg));
           const sinA = V.dot(td, xf);
+          // Wrap pronation/supination angle smoothly around anatomical mid-pronation (+90 deg)
+          // into [-90 deg, +270 deg], then clamp gently to physiological radioulnar range [-15 deg, +185 deg].
+          // Eliminates the old -0.35 rad jump that twisted forearms +170 deg upside down!
           let alpha = Math.atan2(sinA, cosA);
-          if (alpha < -0.35) alpha += 2 * Math.PI;
+          if (alpha < -Math.PI * 0.5) alpha += 2 * Math.PI;
+          const alphaFa = clamp(alpha, -0.26, 3.23);
           const twist = (ang) => {
             const ca = Math.cos(ang), sa = Math.sin(ang);
             const za = V.norm(V.add(V.mul(zf, ca), V.mul(xf, sg * sa)));
             return M.fromCols(V.cross(yf, za), yf, za);
           };
-          faR = twist(alpha * 0.5);
-          handR = twist(alpha);
+          faR = twist(alphaFa * 0.5);
+          handR = twist(alphaFa);
+        }
+      }
+      // If wrist is flexed/extended (W -> G not collinear with E -> W, e.g. front rack),
+      // align the hand segment's longitudinal axis with W -> G via minimal-angle swing.
+      if (J.G && J.G[sd]) {
+        const wg = V.sub(J.G[sd], W);
+        if (V.len(wg) > 1e-4) {
+          const yh = V.mul(V.norm(wg), -1); // distal -> proximal (matches yf convention)
+          const cosH = clamp(V.dot(yf, yh), -1, 1);
+          if (cosH < 0.9995) {
+            const ax = V.cross(yf, yh), al = V.len(ax);
+            if (al > 1e-5) {
+              const k = V.mul(ax, 1 / al), ang = Math.acos(cosH);
+              const ca = Math.cos(ang), sa = Math.sin(ang);
+              const rotV = (v) => {
+                const kv = V.dot(k, v), cx = V.cross(k, v);
+                return [
+                  v[0] * ca + cx[0] * sa + k[0] * kv * (1 - ca),
+                  v[1] * ca + cx[1] * sa + k[1] * kv * (1 - ca),
+                  v[2] * ca + cx[2] * sa + k[2] * kv * (1 - ca),
+                ];
+              };
+              const xh = rotV(M.col(handR, 0));
+              const zh = V.norm(V.perp(rotV(M.col(handR, 2)), yh));
+              handR = M.fromCols(V.cross(yh, zh), yh, zh);
+              void xh;
+            }
+          }
         }
       }
       f['fa' + sd] = { R: faR, p: E };
@@ -1525,7 +1716,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   const BODY = {
     G, MASS, TREE, PLATE_R, BAR_R, BENCH_H, SEGREF, SPANK, ATT, BEND, FACE, BACK, CHEST,
     makeBody, wingspan, singleArm, elbowToTip, legLength, segScale, sideOf, lm, trunk, girdle, ghWorld, wristOf,
-    limbFrames, solveBenchElbow, stackElbow: solveBenchElbow, chestX, profileX, mlRatio,
+    limbFrames, solveBenchElbow, stackElbow: solveBenchElbow, solveRackArm, chestX, profileX, bodyBarMinX, mlRatio,
     neutralPose, massPoints, comX,
   };
 
@@ -1534,7 +1725,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   Object.assign(LAB, {
     G, MASS, PLATE_R, BAR_R, BENCH_H, SEGREF, SPANK, ATT, BEND, FACE, BACK,
     makeBody, wingspan, singleArm, elbowToTip, legLength, segScale, lm, trunk, girdle, ghWorld, wristOf,
-    limbFrames, solveBenchElbow, chestX, profileX, mlRatio,
+    limbFrames, solveBenchElbow, solveRackArm, chestX, profileX, bodyBarMinX, mlRatio,
     neutralPose, massPoints, comX,
   });
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -3446,7 +3637,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const barLocal = [bl[0] * sc[0], bl[1] * sc[1], 0];
     const front = t.bar === 'front', low = t.bar === 'low';
     const gird = front ? { retract: rad(-9), elevate: rad(9) } : { retract: rad(low ? 11 : 7), elevate: rad(3) };
-    const poleL = front ? [1, -0.15, 0] : low ? [-0.95, -0.55, 0.12] : [-0.25, -1, 0.18];
+    const poleL = front ? [0.95, -0.08, 0.28] : low ? [-0.95, -0.55, 0.12] : [-0.25, -1, 0.18];
     const gripH = (t.grip * s) / 2;
     const lim = rad(t.hipROM || 128);
     const loadKg = o.load || 0;
@@ -3465,8 +3656,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         J.S[sd] = bd.ghWorld(f, body, sd);
         const tgt = [bar[0], bar[1], sg * gripH];
         const pole = M.ap(f.thorax.R, [poleL[0], poleL[1], poleL[2] * sg]);
-        const ik = ik2(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, pole);
-        J.E[sd] = ik.mid; J.G[sd] = tgt; J.W[sd] = bd.wristOf(body, ik.mid, tgt);
+        if (front && bd.solveRackArm) {
+          const rk = bd.solveRackArm(body, f, sd, J.S[sd], tgt, pole, 1);
+          J.E[sd] = rk.E; J.W[sd] = rk.W; J.G[sd] = tgt;
+        } else {
+          const ik = ik2(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, pole);
+          J.E[sd] = ik.mid; J.G[sd] = tgt; J.W[sd] = bd.wristOf(body, ik.mid, tgt);
+        }
         (J.P = J.P || {})[sd] = pole;
         J.H[sd] = [hx, hy, sg * body.hipHalf];
         J.K[sd] = [kx, ky, sg * (stance / 2 + kzo)];
@@ -4495,15 +4691,16 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       return { thS, thT, phi, xB, yB: S[1] - La * Math.cos(dl) };
     };
 
-    const k00 = solvePullKnot(rad(22), 0.022 * s, plateR, rad(8));
+    const k00 = solvePullKnot(rad(20), 0.068 * s, plateR, rad(6));
     const hKnee = aY0 + body.Ls * 1.06;
-    const k28 = solvePullKnot(rad(6), -0.020 * s, hKnee, rad(5));
+    const k28 = solvePullKnot(rad(4), 0.056 * s, hKnee, rad(4));
     const hPower = aY0 + body.Ls + body.Lf * 0.42;
-    const k38 = solvePullKnot(rad(18), -0.010 * s, hPower, rad(2));
+    const k38 = solvePullKnot(rad(14), 0.064 * s, hPower, rad(2));
 
     // Exact straight-arm bar height at p = 0.54 (triple extension with heel rise & trap shrug)
     const scT = bd.segScale(body, 'thorax');
-    const rackL = [BARPOS.front[0] * scT[0], BARPOS.front[1] * scT[1], 0];
+    // Front-rack shelf sits cleanly on top of the anterior deltoids & clavicles (outside sternum/throat)
+    const rackL = [0.132 * scT[0] * body.girth, 0.256 * scT[1], 0];
     const buildExtPose = () => {
       const heelR = 0.064 * s * Math.sin(Math.PI * smooth(0.42, 0.64, 0.54));
       const aYe = aY0 + heelR * 0.78;
@@ -4513,10 +4710,10 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       const ky = aYe + Math.sqrt(Math.max(1e-6, body.Ls * body.Ls - (kx - xA0) * (kx - xA0) - kzo * kzo));
       const dz = stance0 / 2 + kzo - body.hipHalf, r = Math.sqrt(Math.max(1e-6, body.Lf * body.Lf - dz * dz));
       const hx = kx - r * Math.sin(rad(-2)), hy = ky + r * Math.cos(rad(-2));
-      const f = bd.trunk(body, M.rotZ(-rad(-1)), [hx, hy, 0], { lumbar: 0, thoracic: 0, neck: 0, retract: rad(-5), elevate: rad(20) });
+      const f = bd.trunk(body, M.rotZ(-rad(3)), [hx, hy, 0], { lumbar: 0, thoracic: 0, neck: 0, retract: rad(-5), elevate: rad(20) });
       const S = bd.ghWorld(f, body, 'R');
       const dzS = gripH - S[2], LaS = Math.sqrt(Math.max(1e-6, Larm * Larm - dzS * dzS)) * 0.9985;
-      const xExt = 0.022 * s;
+      const xExt = 0.072 * s;
       const dxE = clamp(xExt - S[0], -LaS * 0.6, LaS * 0.6);
       return S[1] - Math.sqrt(Math.max(1e-6, LaS * LaS - dxE * dxE));
     };
@@ -4550,8 +4747,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     // with zero clamping kinks and smooth Wb/Wst in [0.65..1.35]
     const yLow25 = lerp(k00.yB, rackStand[1], 0.25 / 0.90);
     const yLow50 = lerp(k00.yB, rackStand[1], 0.50 / 0.90);
-    const kLow25 = solvePullKnot(rad(15), 0.014 * s, yLow25, rad(4));
-    const kLow50 = solvePullKnot(rad(8),  0.020 * s, Math.min(yLow50, yExt * 0.96), rad(2));
+    const kLow25 = solvePullKnot(rad(12), 0.068 * s, yLow25, rad(4));
+    const kLow50 = solvePullKnot(rad(5),  0.072 * s, Math.min(yLow50, yExt * 0.96), rad(2));
 
     k = {
       thS: [
@@ -4576,7 +4773,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         { p: 0.00, v: k00.phi },
         { p: 0.28, v: k28.phi },
         { p: 0.38, v: k38.phi },
-        { p: 0.54, v: rad(-1) },
+        { p: 0.54, v: rad(3) },
         { p: 0.65, v: phiCatch * 0.70 },
         { p: 0.74, v: phiCatch },
         { p: 0.90, v: rad(2) },
@@ -4585,8 +4782,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         { p: 0.00, v: k00.xB },
         { p: 0.28, v: k28.xB },
         { p: 0.38, v: k38.xB },
-        { p: 0.54, v: 0.022 * s },
-        { p: 0.65, v: 0.015 * s },
+        { p: 0.54, v: 0.072 * s },
+        { p: 0.65, v: 0.076 * s },
         { p: 0.74, v: rackCatch[0] },
         { p: 0.90, v: rackStand[0] },
       ],
@@ -4696,56 +4893,96 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       yB = rackWorld[1];
     }
 
-    // Continuous reach safeguard (never clips or detaches hands)
-    const dBar = Math.hypot(xB - S0[0], yB - S0[1]);
-    if (dBar > LaStraight) {
-      const kClamp = LaStraight / dBar;
-      xB = S0[0] + (xB - S0[0]) * kClamp;
-      yB = S0[1] + (yB - S0[1]) * kClamp;
-    }
-    const barPos = [xB, yB, 0];
-
-    // Smooth elbow whip pole: straight hang -> high-pull elbows up/out during unweighting -> front-rack elbows forward
-    const wHigh = isLower ? 0 : smooth(0.54, 0.62, pc) * (1 - smooth(0.62, 0.70, pc));
-    const wRack = isLower ? smooth(0.58, 0.86, pc) : smooth(0.60, 0.72, pc);
-    const wHang = Math.max(0, 1 - wHigh - wRack);
-
+    // Build legs first so the general body-envelope collision solver has exact world shin/knee/thigh/trunk geometry
     const J = { S: {}, E: {}, W: {}, G: {}, H: {}, K: {}, A: {} };
     for (const sd of ['R', 'L']) {
       const sg = sideOf(sd);
       J.S[sd] = bd.ghWorld(f, body, sd);
+      J.H[sd] = [hx, hy, sg * body.hipHalf];
+      J.K[sd] = [kx, ky, sg * (stance / 2 + kzo)];
+      J.A[sd] = [xA, aY, (sg * stance) / 2];
+    }
+
+    // Enforce physical rigid-body barbell clearance against shins, knees, thighs, pelvis, abdomen, and chest!
+    // Uses C-infinity smooth upper bound so horizontal acceleration d2x/dt2 never spikes on contact transitions,
+    // and smoothly relaxes chestMaxY as the bar nestles into the anterior deltoid / clavicle front-rack hollow.
+    const inRack = isLower ? smooth(0.82, 0.90, pc) : smooth(0.68, 0.74, pc);
+    let xClear = null;
+    if (bd.bodyBarMinX) {
+      const xC0 = bd.bodyBarMinX(f, J, body, yB, { margin: 0.005 * s, chestMaxY: null, includeHead: true });
+      const xC1 = bd.bodyBarMinX(f, J, body, yB, { margin: 0.002 * s, chestMaxY: 0.21, includeHead: true });
+      xClear = xC0 != null && xC1 != null ? lerp(xC0, xC1, inRack) : (xC0 != null ? xC0 : xC1);
+      if (xClear != null) {
+        const kS = 0.014 * s, diff = xB - xClear;
+        xB = 0.5 * (xB + xClear + Math.sqrt(diff * diff + kS * kS));
+      }
+    }
+
+    // Continuous reach safeguard: if enforcing xClear pushes the bar slightly beyond arm reach,
+    // adjust yB toward shoulder height first so xB NEVER gets pulled back inside the body!
+    const dBar = Math.hypot(xB - S0[0], yB - S0[1]);
+    if (dBar > LaStraight) {
+      if (xClear != null && Math.abs(xB - S0[0]) < LaStraight * 0.96) {
+        const dyMax = Math.sqrt(Math.max(1e-6, LaStraight * LaStraight - (xB - S0[0]) * (xB - S0[0])));
+        yB = S0[1] + (yB >= S0[1] ? dyMax : -dyMax);
+      } else {
+        const kClamp = LaStraight / dBar;
+        xB = S0[0] + (xB - S0[0]) * kClamp;
+        yB = S0[1] + (yB - S0[1]) * kClamp;
+      }
+    }
+    const barPos = [xB, yB, 0];
+
+    // Smooth, singularity-free anatomical elbow arc around a guaranteed-clear bar:
+    // Because the bar stays strictly outside the anterior body surface (xB >= xClear), u = (W - S)/d
+    // always lies in the anterior-lateral hemisphere, so sweeping the elbow laterally -> UNDER the bar ->
+    // high forward front-rack (never upward over the skull, never crossing u) yields smooth Olympic mechanics.
+    const rackW = isLower ? smooth(0.66, 0.88, pc) : smooth(0.64, 0.74, pc);
+    for (const sd of ['R', 'L']) {
+      const sg = sideOf(sd);
       const tgt = [xB, yB, sg * gripH];
-      const pHang = [-0.55, -0.15, 0.80 * sg];
-      const pHigh = [-0.15, 0.90, 0.75 * sg];
-      const pRack = [1.0, -0.12, 0.08 * sg];
-      const poleL = [
-        pHang[0] * wHang + pHigh[0] * wHigh + pRack[0] * wRack,
-        pHang[1] * wHang + pHigh[1] * wHigh + pRack[1] * wRack,
-        pHang[2] * wHang + pHigh[2] * wHigh + pRack[2] * wRack,
-      ];
-      const pole = M.ap(f.thorax.R, poleL);
-      if ((!isLower && pc <= 0.54) || (isLower && pc <= 0.50 && V.dist(J.S[sd], tgt) >= (body.Lh + body.Lfa + body.Lgrip) * 0.98)) {
+      let poleL;
+      if (isLower) {
+        const tDrop = smooth(0.42, 0.84, pc);
+        const tRack = smooth(0.72, 0.90, pc);
+        // Controlled un-rack: high front rack -> drop elbows down/forward along ribs -> straight hang
+        poleL = [
+          lerp(-0.14, lerp(0.32, 0.92, tRack), tDrop),
+          lerp(-0.88, lerp(-0.88, -0.22, tRack), tDrop),
+          sg * lerp(0.45, lerp(0.34, 0.32, tRack), tDrop),
+        ];
+      } else {
+        const aPull = smooth(0.54, 0.61, pc);
+        const aWhip = smooth(0.59, 0.67, pc);
+        const aRack = smooth(0.65, 0.74, pc);
+        const p0 = [-0.18, -0.86, 0.48 * sg]; // straight pull
+        const p1 = [ 0.00, -0.24, 0.97 * sg]; // high pull: elbows out laterally, at/below shoulder height
+        const p2 = [ 0.42, -0.78, 0.46 * sg]; // whip UNDER the bar: elbows sweep down & forward
+        const p3 = [ 0.92, -0.22, 0.32 * sg]; // front rack: elbows high & forward, parallel to floor
+        const q1 = [lerp(p0[0], p1[0], aPull), lerp(p0[1], p1[1], aPull), lerp(p0[2], p1[2], aPull)];
+        const q2 = [lerp(q1[0], p2[0], aWhip), lerp(q1[1], p2[1], aWhip), lerp(q1[2], p2[2], aWhip)];
+        poleL = [lerp(q2[0], p3[0], aRack), lerp(q2[1], p3[1], aRack), lerp(q2[2], p3[2], aRack)];
+      }
+      const pole = M.ap(f.thorax.R, V.norm(poleL));
+      if ((!isLower && pc <= 0.54) || (isLower && pc <= 0.44 && V.dist(J.S[sd], tgt) >= (body.Lh + body.Lfa + body.Lgrip) * 0.98)) {
         // Straight-arm pull / straight-arm floor return: exact collinear shoulder -> elbow -> wrist -> bar (180 deg)
         const uArm = V.norm(V.sub(tgt, J.S[sd]));
         J.E[sd] = V.addm(J.S[sd], uArm, body.Lh);
         J.W[sd] = V.addm(J.S[sd], uArm, body.Lh + body.Lfa);
         J.G[sd] = tgt;
       } else {
-        const ik = ik2(J.S[sd], tgt, body.Lh, body.Lfa + body.Lgrip, pole);
-        J.E[sd] = ik.mid;
+        const rk = bd.solveRackArm(body, f, sd, J.S[sd], tgt, pole, rackW);
+        J.E[sd] = rk.E;
+        J.W[sd] = rk.W;
         J.G[sd] = tgt;
-        J.W[sd] = bd.wristOf(body, ik.mid, tgt);
       }
       (J.P = J.P || {})[sd] = pole;
-      J.H[sd] = [hx, hy, sg * body.hipHalf];
-      J.K[sd] = [kx, ky, sg * (stance / 2 + kzo)];
-      J.A[sd] = [xA, aY, (sg * stance) / 2];
     }
     bd.limbFrames(f, J, { yaw: psi, pitch }, { trap: false });
 
     // Dynamic load handoff: hanging hands (pull) -> unweighting turnover -> front-rack thorax shelf (catch & stand)
     const onFloor = t.style === 'floor' && pc <= 1e-4;
-    const shelfFrac = isLower ? smooth(0.52, 0.64, pc) : smooth(0.62, 0.68, pc);
+    const shelfFrac = isLower ? smooth(0.34, 0.50, pc) : smooth(0.62, 0.68, pc);
     const handFrac = 1 - shelfFrac;
     const allowFreefall = !isLower && pc > 0.53;
     const externalLoads = [];
@@ -4770,7 +5007,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       }
     }
 
-    const hasBrush = !isLower && pc > 0.04 && pc < 0.50 && handFrac > 0.5;
+    const hasBrush = !isLower && pc > 0.04 && pc <= 0.56 && handFrac > 0.5;
     const supportHW = lerp(gripH, 0.15 * s, shelfFrac);
 
     return {
@@ -6453,7 +6690,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
 })();
 
 // generated by tools/checks.cjs on 2026-11-25 — do not edit
-(function () { const LAB = (globalThis.LAB = globalThis.LAB || {}); LAB.CHECKS = {"lifter":{"height":178,"mass":81},"refs":{"squat":150,"bench":110,"deadlift":200,"ohp":65},"checks":[{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, conventional deadlift","study":0.976,"model":0.619,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, conventional deadlift","study":0.995,"model":0.637,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, conventional deadlift","study":0.655,"model":0.502,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, conventional deadlift","study":0.885,"model":0.475,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, conventional deadlift","study":0.909,"model":2.599,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, conventional deadlift","study":0.991,"model":0.734,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, sumo deadlift","study":1.042,"model":0.782,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, sumo deadlift","study":0.98,"model":0.838,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, sumo deadlift","study":0.669,"model":0.503,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, sumo deadlift","study":0.632,"model":0.535,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, sumo deadlift","study":0.928,"model":null,"note":"the model barely uses it below the knees","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, sumo deadlift","study":0.897,"model":0.843,"note":"","tol":0.2,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, conventional deadlift","study":1.27,"model":1.354,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, sumo deadlift","study":1.27,"model":1.373,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, trap-bar deadlift","study":1.591,"model":1.392,"tol":0.3,"ok":true},{"src":"lee18","kind":"exercise","label":"Glutes: Romanian ÷ conventional deadlift","study":0.91,"model":0.957,"tol":0.2,"ok":true},{"src":"lee18","kind":"exercise","label":"Front quad: Romanian ÷ conventional deadlift","study":0.431,"model":0.239,"tol":0.2,"ok":true},{"src":"andersen18","kind":"exercise","label":"Outer hamstring: trap-bar ÷ conventional deadlift","study":0.781,"model":0.957,"tol":0.15,"ok":false},{"src":"ridao20","kind":"exercise","label":"Front shoulder: 30° incline ÷ flat bench","study":1.269,"model":1.334,"tol":0.25,"ok":true},{"src":"larsen21","kind":"strength","label":"Max bench, close grip ÷ standard","study":0.952,"model":0.8,"note":"narrow vs medium grip, same lifters","tol":0.06,"ok":false},{"src":"larsen21","kind":"strength","label":"Max bench, wide grip ÷ standard","study":1.008,"model":0.953,"note":"wide vs medium grip, same lifters","tol":0.06,"ok":true},{"src":"ridao20","kind":"strength","label":"Max bench, 30° incline ÷ standard","study":0.778,"model":0.81,"note":"30° incline vs flat, same lifters","tol":0.06,"ok":true},{"src":"andersen18","kind":"strength","label":"Max deadlift, trap bar ÷ standard","study":1.019,"model":0.959,"note":"hex bar vs barbell, same lifters","tol":0.06,"ok":true},{"src":"coratella22","kind":"strength","label":"Max overhead press, behind the neck ÷ standard","study":0.927,"model":0.536,"note":"behind the neck vs front, same lifters","tol":0.06,"ok":false}],"dyn":[{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 1RM, full back squat, m/s","study":0.32,"model":0.26,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 70% 1RM, m/s","study":0.82,"model":0.63,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"gonzalez10","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.16,"model":0.18,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"benavides20","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.33,"model":0.22,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"shoji25","kind":"bend","label":"Hip-to-bar lever, deadlift at 90% ÷ 60% 1RM","study":0.95,"model":0.951,"tol":0.02,"ok":true},{"src":"escamilla01","kind":"rom","label":"Bar travel, sumo ÷ conventional deadlift","study":0.9,"model":0.926,"tol":0.05,"note":"the national-meet summary gives 0.82 (Cissik on Escamilla 2000)","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max conventional deadlift, share of bar travel","study":0.61,"model":0.61,"tol":0.03,"note":"set from this","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max sumo deadlift, share of bar travel","study":0.56,"model":0.56,"tol":0.03,"note":"set from this","ok":true},{"src":"swinton11","kind":"scale","label":"Peak low-back moment, deadlift at 80% ÷ 10% 1RM","study":1.824,"model":2.343,"tol":0.3,"ok":false},{"src":"chol","kind":"moment","label":"Peak low-back moment, 90 kg lifter, 260 kg conventional deadlift at max speed, N·m","study":988,"model":1029.421,"tol":120,"ok":true},{"src":"chol","kind":"moment","label":"Sumo ÷ conventional peak low-back moment","study":0.9,"model":0.803,"tol":0.06,"ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 50% pushed as fast as possible","study":1,"model":0.995,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 70% pushed as fast as possible","study":1,"model":1.019,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 85% pushed as fast as possible","study":1,"model":1.052,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 50% pushed as fast as possible","study":1,"model":0.985,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 70% pushed as fast as possible","study":1,"model":1.054,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 85% pushed as fast as possible","study":1,"model":1.093,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 50% pushed as fast as possible","study":1,"model":0.896,"tol":0.1,"note":"","ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 70% pushed as fast as possible","study":1,"model":0.911,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 85% pushed as fast as possible","study":1,"model":0.963,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 50% pushed as fast as possible","study":1,"model":1.044,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 70% pushed as fast as possible","study":1,"model":0.971,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 85% pushed as fast as possible","study":1,"model":0.943,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true}]}; })();
+(function () { const LAB = (globalThis.LAB = globalThis.LAB || {}); LAB.CHECKS = {"lifter":{"height":178,"mass":81},"refs":{"squat":150,"bench":110,"deadlift":200,"ohp":65},"checks":[{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, conventional deadlift","study":0.976,"model":0.619,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, conventional deadlift","study":0.995,"model":0.637,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, conventional deadlift","study":0.655,"model":0.502,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, conventional deadlift","study":0.885,"model":0.475,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, conventional deadlift","study":0.909,"model":2.599,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, conventional deadlift","study":0.991,"model":0.735,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, sumo deadlift","study":1.042,"model":0.782,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, sumo deadlift","study":0.98,"model":0.838,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, sumo deadlift","study":0.669,"model":0.503,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, sumo deadlift","study":0.632,"model":0.535,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, sumo deadlift","study":0.928,"model":null,"note":"the model barely uses it below the knees","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, sumo deadlift","study":0.897,"model":0.843,"note":"","tol":0.2,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, conventional deadlift","study":1.27,"model":1.354,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, sumo deadlift","study":1.27,"model":1.373,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, trap-bar deadlift","study":1.591,"model":1.392,"tol":0.3,"ok":true},{"src":"lee18","kind":"exercise","label":"Glutes: Romanian ÷ conventional deadlift","study":0.91,"model":0.957,"tol":0.2,"ok":true},{"src":"lee18","kind":"exercise","label":"Front quad: Romanian ÷ conventional deadlift","study":0.431,"model":0.239,"tol":0.2,"ok":true},{"src":"andersen18","kind":"exercise","label":"Outer hamstring: trap-bar ÷ conventional deadlift","study":0.781,"model":0.957,"tol":0.15,"ok":false},{"src":"ridao20","kind":"exercise","label":"Front shoulder: 30° incline ÷ flat bench","study":1.269,"model":1.502,"tol":0.25,"ok":true},{"src":"larsen21","kind":"strength","label":"Max bench, close grip ÷ standard","study":0.952,"model":0.697,"note":"narrow vs medium grip, same lifters","tol":0.06,"ok":false},{"src":"larsen21","kind":"strength","label":"Max bench, wide grip ÷ standard","study":1.008,"model":0.997,"note":"wide vs medium grip, same lifters","tol":0.06,"ok":true},{"src":"ridao20","kind":"strength","label":"Max bench, 30° incline ÷ standard","study":0.778,"model":0.794,"note":"30° incline vs flat, same lifters","tol":0.06,"ok":true},{"src":"andersen18","kind":"strength","label":"Max deadlift, trap bar ÷ standard","study":1.019,"model":0.959,"note":"hex bar vs barbell, same lifters","tol":0.06,"ok":true},{"src":"coratella22","kind":"strength","label":"Max overhead press, behind the neck ÷ standard","study":0.927,"model":0.537,"note":"behind the neck vs front, same lifters","tol":0.06,"ok":false}],"dyn":[{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 1RM, full back squat, m/s","study":0.32,"model":0.26,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 70% 1RM, m/s","study":0.82,"model":0.63,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"gonzalez10","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.16,"model":0.18,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"benavides20","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.33,"model":0.22,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"shoji25","kind":"bend","label":"Hip-to-bar lever, deadlift at 90% ÷ 60% 1RM","study":0.95,"model":0.951,"tol":0.02,"ok":true},{"src":"escamilla01","kind":"rom","label":"Bar travel, sumo ÷ conventional deadlift","study":0.9,"model":0.926,"tol":0.05,"note":"the national-meet summary gives 0.82 (Cissik on Escamilla 2000)","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max conventional deadlift, share of bar travel","study":0.61,"model":0.61,"tol":0.03,"note":"set from this","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max sumo deadlift, share of bar travel","study":0.56,"model":0.56,"tol":0.03,"note":"set from this","ok":true},{"src":"swinton11","kind":"scale","label":"Peak low-back moment, deadlift at 80% ÷ 10% 1RM","study":1.824,"model":2.343,"tol":0.3,"ok":false},{"src":"chol","kind":"moment","label":"Peak low-back moment, 90 kg lifter, 260 kg conventional deadlift at max speed, N·m","study":988,"model":1029.421,"tol":120,"ok":true},{"src":"chol","kind":"moment","label":"Sumo ÷ conventional peak low-back moment","study":0.9,"model":0.803,"tol":0.06,"ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 50% pushed as fast as possible","study":1,"model":0.995,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 70% pushed as fast as possible","study":1,"model":1.019,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 85% pushed as fast as possible","study":1,"model":1.052,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 50% pushed as fast as possible","study":1,"model":0.978,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 70% pushed as fast as possible","study":1,"model":1.048,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 85% pushed as fast as possible","study":1,"model":1.09,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 50% pushed as fast as possible","study":1,"model":0.896,"tol":0.1,"note":"","ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 70% pushed as fast as possible","study":1,"model":0.911,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 85% pushed as fast as possible","study":1,"model":0.963,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 50% pushed as fast as possible","study":1,"model":0.977,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 70% pushed as fast as possible","study":1,"model":0.965,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 85% pushed as fast as possible","study":1,"model":0.946,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true}]}; })();
 
 /* msk: whole-body muscle-level static optimization.
    Each frame all active joint moments and girdle/grip forces from inverse dynamics are shared among
