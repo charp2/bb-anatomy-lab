@@ -187,10 +187,22 @@ button{-webkit-tap-highlight-color:transparent}
 #play[data-state="paused"]::before{width:0;height:0;border:0;border-left:13px solid var(--chalk);border-top:8px solid transparent;border-bottom:8px solid transparent;margin-left:4px}
 .scrubwrap{flex:1;min-width:0;position:relative;padding-top:12px}
 .marks{position:absolute;left:10px;right:10px;top:0;height:14px}
-.marks button{position:absolute;top:0;width:18px;height:18px;margin-left:-9px;border:0;background:none;padding:0;cursor:pointer}
-.marks button::before{content:"";position:absolute;left:5px;top:3px;width:8px;height:8px;border-radius:2px;transform:rotate(45deg);background:var(--muted);transition:background-color .24s ease,box-shadow .28s ease,transform .28s cubic-bezier(.22,1,.36,1)}
+.marks button{position:absolute;top:0;width:18px;height:18px;margin-left:-9px;border:0;background:none;padding:0;cursor:pointer;outline:none}
+.marks button::before{content:"";position:absolute;left:5px;top:3px;width:8px;height:8px;border-radius:2px;transform:rotate(45deg);background:var(--muted);transition:background-color .22s ease,box-shadow .24s ease,transform .24s cubic-bezier(.22,1,.36,1)}
 .marks button.on::before{background:var(--chalk);box-shadow:0 0 0 3px rgba(233,239,236,.22);transform:rotate(45deg) scale(1.18)}
+.marks button:hover::before,.marks button:focus-visible::before{background:var(--chalk);box-shadow:0 0 0 4px rgba(233,239,236,.26);transform:rotate(45deg) scale(1.38)}
 .marks button.b::before{background:var(--force)}
+.marks button.b:hover::before,.marks button.b:focus-visible::before{background:var(--force);box-shadow:0 0 0 4px rgba(143,227,240,.30)}
+.mtip{position:fixed;z-index:65;pointer-events:none;width:max-content;max-width:272px;padding:9px 11px 8px;border-radius:11px;background:rgba(13,28,35,.96);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:var(--chalk);box-shadow:0 10px 28px rgba(0,0,0,.52),inset 0 0 0 1px rgba(233,239,236,.15);font-size:12.5px;line-height:1.42;opacity:0;transform:translate3d(0,6px,0) scale(.98);transition:opacity .15s ease,transform .18s cubic-bezier(.22,1,.36,1)}
+.mtip.show{opacity:1;transform:translate3d(0,0,0) scale(1)}
+.mtip::after{content:"";position:absolute;left:var(--ax,50%);bottom:-5px;width:9px;height:9px;margin-left:-4.5px;background:rgba(13,28,35,.96);border-right:1px solid rgba(233,239,236,.15);border-bottom:1px solid rgba(233,239,236,.15);transform:rotate(45deg)}
+.mtip-hd{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--force)}
+.mtip-hd i{width:6px;height:6px;border-radius:1.5px;transform:rotate(45deg);background:currentColor;flex:none}
+.mtip-hd.peak{color:#f6b475}
+.mtip-hd .mph{margin-left:auto;font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)}
+.mtip-body{margin:0;color:rgba(233,239,236,.90)}
+.mtip-body b{color:var(--chalk);font-weight:600}
+.mtip-hint{display:block;margin-top:5px;font-size:10.5px;color:var(--faint)}
 .phases{position:relative;height:15px;margin:0 10px;font-size:11px;color:var(--faint);overflow:hidden}
 .phases span{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap;transition:color .22s ease}
 .phases span.on{color:var(--chalk)}
@@ -437,7 +449,7 @@ h2{font:700 18px/1.25 var(--display);font-stretch:90%;margin:10px 0 0;text-wrap:
   .srow{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) 54px;font-size:12.5px}
   .sxs{gap:8px}
 }
-@media (prefers-reduced-motion:reduce){.brow,.brow .bv i,.brow .rk,.caption,.callout,.callout::before,.callout-slide,.callout .cjump,.feed button,.feed button::before,.marks button::before,.meter i,.md::before{transition:none !important;animation:none !important}}
+@media (prefers-reduced-motion:reduce){.brow,.brow .bv i,.brow .rk,.caption,.callout,.callout::before,.callout-slide,.callout .cjump,.feed button,.feed button::before,.marks button::before,.mtip,.meter i,.md::before{transition:none !important;animation:none !important}}
 
 /* first-run nudge and the "what limits you" card */
 .nudge{border:1px solid rgba(143,227,240,.45);background:rgba(143,227,240,.07);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
@@ -14133,7 +14145,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       $('shaky').hidden = !sh; $('shaky').textContent = sh || ''; }
     if (!body) return;
     const N = 48, beats = [];
-    const add = (i, pri, html, focus, side) => beats.push({ u: i / N, i, pri, html, focus, side });
+    const add = (i, pri, html, focus, side, tag) => beats.push({ u: i / N, i, pri, html, focus, side, tag: tag || 'Key moment' });
     if (S.mode === 'compare' && cmpRep) {
       const A = framesFor(cmpRep.a.cfg, N, cmpRep.a.mov), B = framesFor(cmpRep.b.cfg, N, cmpRep.b.mov);
       story.frames = [A, B];
@@ -14163,7 +14175,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         }
         const ma = A[g.i].mode[g.id], mb = B[g.i].mode[g.id];
         if (!why && ma && mb && ma !== mb) why = 'It is ' + MODE[mb][1] + ' in ' + nb + ' but ' + MODE[ma][1] + ' in ' + na + '.';
-        add(g.i, 3 + Math.abs(g.d) * 4, '<b>' + esc(nameOf(g.id)) + '</b>: ' + hi + ' ' + pct(hv) + ', ' + lo + ' ' + pct(lv) + '. ' + why, g.id, g.d > 0 ? 'b' : 'a');
+        add(g.i, 3 + Math.abs(g.d) * 4, '<b>' + esc(nameOf(g.id)) + '</b>: ' + hi + ' ' + pct(hv) + ', ' + lo + ' ' + pct(lv) + '. ' + why, g.id, g.d > 0 ? 'b' : 'a', 'Biggest difference');
       }
       // 2. crossovers: the lead changes hands
       let cross = 0;
@@ -14175,7 +14187,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
           if (Math.min(a, b) < 0.2) { continue; }
           const sg = b - a > 0.06 ? 1 : a - b > 0.06 ? -1 : 0;
           if (sg && prev && sg !== prev) {
-            add(i, 3.2, 'From here ' + (sg > 0 ? nb : na) + ' works the <b>' + esc(nm(id)) + '</b> harder than ' + (sg > 0 ? na : nb) + ', the reverse of a moment ago.', id, sg > 0 ? 'b' : 'a');
+            add(i, 3.2, 'From here ' + (sg > 0 ? nb : na) + ' works the <b>' + esc(nm(id)) + '</b> harder than ' + (sg > 0 ? na : nb) + ', the reverse of a moment ago.', id, sg > 0 ? 'b' : 'a', 'Lead crossover');
             cross++; break;
           }
           if (sg) prev = sg;
@@ -14189,14 +14201,14 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
           const mx = Math.abs(X[im].J[k]), my = Math.abs(Y[im].J[k]);
           if (mx < 40) continue;
           const dd = my / mx - 1;
-          add(im, 2 + Math.min(2, Math.abs(dd) * 3), nx + '\'s ' + JLOAD[k] + ' peaks here at <b>' + fN(mx) + ' N·m</b>' + E('jointM') + '. ' + ny + ' at the same instant: ' + fN(my) + (Math.abs(dd) > 0.05 ? ' (' + (dd > 0 ? '+' : '−') + Math.round(Math.abs(dd) * 100) + '%).' : ', about the same.'), null, sd);
+          add(im, 2 + Math.min(2, Math.abs(dd) * 3), nx + '\'s ' + JLOAD[k] + ' peaks here at <b>' + fN(mx) + ' N·m</b>' + E('jointM') + '. ' + ny + ' at the same instant: ' + fN(my) + (Math.abs(dd) > 0.05 ? ' (' + (dd > 0 ? '+' : '−') + Math.round(Math.abs(dd) * 100) + '%).' : ', about the same.'), null, sd, 'Peak ' + JLOAD[k]);
         }
       }
       // 4. each lifter's hardest instant
       for (const [X, nx, sd] of [[A, na, 'a'], [B, nb, 'b']]) {
         let bi = 0, bid = null, bv = 0;
         for (let i = 0; i <= N; i++) for (const id in X[i].F) if (X[i].act[id] > bv) { bv = X[i].act[id]; bid = id; bi = i; }
-        if (bid) add(bi, 4.5, 'The hardest instant for ' + nx + ': <b>' + esc(nm(bid)) + '</b> at ' + pct(bv) + ' of what it can do. At ' + (bv >= 0.98 ? 'this weight that is the limit.' : 'this weight there is ' + Math.round((1 - bv) * 100) + '% left.'), bid, sd);
+        if (bid) add(bi, 4.5, 'The hardest instant for ' + nx + ': <b>' + esc(nm(bid)) + '</b> at ' + pct(bv) + ' of what it can do. At ' + (bv >= 0.98 ? 'this weight that is the limit.' : 'this weight there is ' + Math.round((1 - bv) * 100) + '% left.'), bid, sd, 'Hardest instant');
       }
       // 5. same muscle, opposite action
       let opp = 0;
@@ -14207,7 +14219,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
           const ma = A[i].mode[id], mb = B[i].mode[id], a = A[i].act[id] || 0, b = B[i].act[id] || 0;
           const diff = ma && mb && a > 0.2 && b > 0.2 && ((ma === 'con' && mb === 'ecc') || (ma === 'ecc' && mb === 'con'));
           run = diff ? run + 1 : 0;
-          if (run === 3) { add(i - 2, 2.6, '<b>' + esc(nameOf(id)) + '</b> is ' + MODE[ma][1] + ' in ' + na + ' while it is ' + MODE[mb][1] + ' in ' + nb + '. Same muscle, opposite job.', id); opp++; break; }
+          if (run === 3) { add(i - 2, 2.6, '<b>' + esc(nameOf(id)) + '</b> is ' + MODE[ma][1] + ' in ' + na + ' while it is ' + MODE[mb][1] + ' in ' + nb + '. Same muscle, opposite job.', id, null, 'Opposite action'); opp++; break; }
         }
       }
     } else if (rep) {
@@ -14222,7 +14234,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         if (top === cand) held++; else { cand = top; held = 1; }
         if (held === 3 && cand !== lead) {
           const at = i - 2, jk = JOINT_OF[cand], m = jk && A[at].J[jk] != null ? Math.abs(A[at].J[jk]) : 0;
-          add(at, lead ? 3.4 : 2.4, (lead ? '<b>' + esc(nameOf(cand)) + '</b> takes over from the ' + esc(nm(lead)) + ' as the hardest-working mover' : '<b>' + esc(nameOf(cand)) + '</b> leads the work') + ' at ' + pct(A[at].act[cand]) + '.' + (m > 20 ? ' The ' + JWORD[jk] + (one(jk) ? ' is' : ' are') + ' holding ' + fN(m) + ' N·m' + E('jointM') + ' here.' : ''), cand);
+          add(at, lead ? 3.4 : 2.4, (lead ? '<b>' + esc(nameOf(cand)) + '</b> takes over from the ' + esc(nm(lead)) + ' as the hardest-working mover' : '<b>' + esc(nameOf(cand)) + '</b> leads the work') + ' at ' + pct(A[at].act[cand]) + '.' + (m > 20 ? ' The ' + JWORD[jk] + (one(jk) ? ' is' : ' are') + ' holding ' + fN(m) + ' N·m' + E('jointM') + ' here.' : ''), cand, null, lead ? 'Lead change' : 'Primary mover');
           lead = cand;
         }
       }
@@ -14232,19 +14244,19 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       for (let i = 0; i <= N; i++) for (const id in A[i].F) if (A[i].act[id] > bv) { bv = A[i].act[id]; bid = id; bi = i; }
       if (bid) {
         add(bi, 4.5, 'Hardest instant of the rep: <b>' + esc(nm(bid)) + '</b> at ' + pct(bv) + ' of its capacity.' +
-          (bv >= 0.98 ? ' At this weight that is your limit.' : ' About ' + Math.round((1 - bv) * 100) + '% in reserve.'), bid);
+          (bv >= 0.98 ? ' At this weight that is your limit.' : ' About ' + Math.round((1 - bv) * 100) + '% in reserve.'), bid, null, 'Hardest instant');
       }
       // 3. joint peaks
       for (const k of (movC.joints || [])) {
         if (k === 'grip' || k === 'ankle' || !JLOAD[k]) continue;
         let im = 0; for (let i = 0; i <= N; i++) if (Math.abs(A[i].J[k]) > Math.abs(A[im].J[k])) im = i;
         const mx = Math.abs(A[im].J[k]); if (mx < 40) continue;
-        add(im, 2.2, 'Your ' + JLOAD[k] + ' peaks here: <b>' + fN(mx) + ' N·m</b>' + E('jointM') + (k === 'lumbar' ? ', like holding your own body weight ' + Math.round(100 * mx / (S.lifter.mass * L.G)) + ' cm out in front of your spine.' : '.'));
+        add(im, 2.2, 'Your ' + JLOAD[k] + ' peaks here: <b>' + fN(mx) + ' N·m</b>' + E('jointM') + (k === 'lumbar' ? ', like holding your own body weight ' + Math.round(100 * mx / (S.lifter.mass * L.G)) + ' cm out in front of your spine.' : '.'), null, null, 'Peak ' + JLOAD[k]);
       }
       // 4. the turnaround
       for (let i = 1; i <= N; i++) if (A[i].dir !== A[i - 1].dir && A[i - 1].dir < 0 && A[i].dir >= 0) {
         const tops = Object.keys(A[i - 1].F).filter((id) => A[i - 1].mode[id] === 'ecc' && A[i - 1].act[id] > 0.25).sort((p, q) => A[i - 1].act[q] - A[i - 1].act[p]).slice(0, 2);
-        if (tops.length) add(i, 3, 'The turnaround: the ' + tops.map((id) => '<b>' + esc(nm(id)) + '</b>').join(' and ') + ' stop lengthening under load and start shortening. Static loads peak here; a bounce would add to them.', tops[0]);
+        if (tops.length) add(i, 3, 'The turnaround: the ' + tops.map((id) => '<b>' + esc(nm(id)) + '</b>').join(' and ') + ' stop lengthening under load and start shortening. Static loads peak here; a bounce would add to them.', tops[0], null, 'Turnaround');
         break;
       }
       // 5. two-joint paradoxes
@@ -14252,7 +14264,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         for (let i = 0; i <= N; i++) {
           const a2 = A[i].act[two] || 0, a1 = A[i].act[one] || 0, m2 = A[i].mode[two], m1 = A[i].mode[one];
           if (a2 > 0.12 && a1 > 0.2 && m2 && m1 && m2 !== m1 && m2 !== 'iso' && m1 !== 'iso') {
-            add(i, 2.4, '<b>' + esc(nameOf(two)) + '</b> is ' + MODE[m2][1] + ' while the ' + esc(nm(one)) + ' is ' + MODE[m1][1] + ': ' + txt + '.', two); break;
+            add(i, 2.4, '<b>' + esc(nameOf(two)) + '</b> is ' + MODE[m2][1] + ' while the ' + esc(nm(one)) + ' is ' + MODE[m1][1] + ': ' + txt + '.', two, null, 'Two-joint paradox'); break;
           }
         }
       }
@@ -14270,8 +14282,9 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     story.beats = kept;
     $('feed').innerHTML = kept.map((b, k) => '<li data-k="' + k + '"><button type="button"><small>' + Math.round(b.u * 100) + '% through, ' + esc(lc(b.phase)) + '</small>' + b.html + '</button></li>').join('');
     feedEls = [...$('feed').children];
-    $('marks').innerHTML = kept.map((b, k) => '<button type="button" data-k="' + k + '" class="' + (b.side === 'b' ? 'b' : '') + '" style="left:' + (b.u * 100).toFixed(2) + '%" aria-label="Moment ' + (k + 1) + ', ' + Math.round(b.u * 100) + '% through the rep"></button>').join('');
+    $('marks').innerHTML = kept.map((b, k) => '<button type="button" data-k="' + k + '" class="' + (b.side === 'b' ? 'b' : '') + '" style="left:' + (b.u * 100).toFixed(2) + '%" aria-label="' + esc(b.tag) + ', ' + Math.round(b.u * 100) + '% through the rep"></button>').join('');
     markEls = [...$('marks').children];
+    hideMarkTip();
     shownBeat = -2;
     shownCalloutKey = '';
   }
@@ -14333,8 +14346,42 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     if (b.focus) selectRow(b.focus, true, true); else markDirty();
     shownBeat = -2;
   }
+  const mtip = document.createElement('div');
+  mtip.className = 'mtip'; mtip.setAttribute('role', 'tooltip'); mtip.hidden = true;
+  document.body.appendChild(mtip);
+  let mtipFor = null;
+  function showMarkTip(btn) {
+    const k = +btn.dataset.k, b = story.beats[k];
+    if (!b) return;
+    mtipFor = btn;
+    // Strip interactive estimate superscripts for clean at-a-glance tooltip copy
+    const cleanHtml = b.html.replace(/<sup class="est"[\s\S]*?<\/sup>/g, '');
+    const isPeak = b.tag === 'Hardest instant' || /^Peak /.test(b.tag);
+    mtip.innerHTML = '<div class="mtip-hd' + (isPeak ? ' peak' : '') + '"><i></i><span>' + esc(b.tag) + '</span><span class="mph">' + esc(b.phase) + ' · ' + Math.round(b.u * 100) + '%</span></div><p class="mtip-body">' + cleanHtml + '</p><span class="mtip-hint">Click to jump here</span>';
+    mtip.hidden = false;
+    mtip.classList.remove('show');
+    const r = btn.getBoundingClientRect(), w = mtip.offsetWidth, h = mtip.offsetHeight;
+    const cx = r.left + r.width * 0.5;
+    const left = clamp(cx - w * 0.5, 10, window.innerWidth - w - 10);
+    const top = Math.max(10, r.top - h - 10);
+    mtip.style.left = left.toFixed(1) + 'px';
+    mtip.style.top = top.toFixed(1) + 'px';
+    mtip.style.setProperty('--ax', clamp(cx - left, 14, w - 14).toFixed(1) + 'px');
+    requestAnimationFrame(() => { if (mtipFor === btn) mtip.classList.add('show'); });
+  }
+  function hideMarkTip() {
+    mtipFor = null;
+    mtip.classList.remove('show');
+    mtip.hidden = true;
+  }
   $('feed').addEventListener('click', (e) => { const li = e.target.closest('li'); if (li) seekBeat(+li.dataset.k); });
-  $('marks').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) seekBeat(+b.dataset.k); });
+  $('marks').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { hideMarkTip(); seekBeat(+b.dataset.k); } });
+  $('marks').addEventListener('pointerover', (e) => { if (e.pointerType === 'touch') return; const b = e.target.closest('button'); if (b && b !== mtipFor) showMarkTip(b); });
+  $('marks').addEventListener('pointerout', (e) => { const b = e.target.closest('button'); if (b && !b.contains(e.relatedTarget)) hideMarkTip(); });
+  $('marks').addEventListener('focusin', (e) => { const b = e.target.closest('button'); if (b) showMarkTip(b); });
+  $('marks').addEventListener('focusout', (e) => { const b = e.target.closest('button'); if (b) hideMarkTip(); });
+  $('scrub').addEventListener('pointerdown', hideMarkTip);
+  window.addEventListener('resize', hideMarkTip);
   $('callout').addEventListener('click', (e) => { const b = e.target.closest('button[data-k]'); if (b && !b.classList.contains('hide')) seekBeat(+b.dataset.k); });
   // which beat is "now": the latest one at or before the playhead, for a short while after it
   function liveStory() {
