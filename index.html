@@ -183,8 +183,6 @@ button{-webkit-tap-highlight-color:transparent}
 .timeline{display:flex;align-items:center;gap:10px;padding:6px 12px 8px;border-top:1px solid var(--line)}
 .round{flex:none;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);background:none;display:grid;place-items:center;cursor:pointer;padding:0}
 .round.txt{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
-.pace{flex:none;height:34px;padding:0 12px;border-radius:17px;border:1px solid var(--line);background:none;color:var(--chalk);font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
-.pace[aria-pressed="false"]{color:var(--muted)}
 #play::before{content:"";display:block;width:13px;height:14px;border-left:4.5px solid var(--chalk);border-right:4.5px solid var(--chalk)}
 #play[data-state="paused"]::before{width:0;height:0;border:0;border-left:13px solid var(--chalk);border-top:8px solid transparent;border-bottom:8px solid transparent;margin-left:4px}
 .scrubwrap{flex:1;min-width:0;position:relative;padding-top:12px}
@@ -523,7 +521,6 @@ p.warn{margin:0 0 10px;padding:8px 10px;border-left:3px solid var(--warn);backgr
 .app.m .spd{font-size:11.5px;min-height:31px}
 .app.m .callout{height:184px;padding:10px 12px 10px 14px}
 .app.m .callout p{font-size:13.5px;line-height:1.38}
-.app.m .pace{height:40px;padding:0 10px;font-size:12px}
 .app.m .tag{top:calc(env(safe-area-inset-top) + 84px)}
 .app.m .rail{top:calc(env(safe-area-inset-top) + 76px);right:2px;width:70px;height:min(116px,calc(var(--sy) - env(safe-area-inset-top) - 230px));transition:height .45s var(--spring)}
 .app.m .rail .stop{font-size:12px}
@@ -869,7 +866,6 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
           <div class="phases" id="phases" aria-hidden="true"></div>
         </div>
         <button type="button" class="round txt" id="speed" aria-label="Playback speed">1×</button>
-        <button type="button" class="pace" id="pace" aria-pressed="true">Max speed</button>
       </div>
       </div>
     </section>
@@ -2773,14 +2769,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   }
 
   const tempoCache = new Map();
-  function tempo(body, lift, t, pct, load, pace) {
-    pct = clamp(pct, 0.2, 1);
-    pace = pace || 'max';
-    const key = JSON.stringify([body.H, body.mass, body.fs, body.ss, body.ts, body.hs, body.fas, lift, t, Math.round(pct * 200), Math.round(load), pace]);
+  function tempo(body, lift, t, pct, load) {
+    pct = clamp(pct == null ? 0.75 : pct, 0.2, 1);
+    const key = JSON.stringify([body.H, body.mass, body.fs, body.ss, body.ts, body.hs, body.fas, lift, t, Math.round(pct * 200), Math.round(load)]);
     if (tempoCache.has(key)) return tempoCache.get(key);
 
     const mov = LAB.MOVEMENTS && LAB.MOVEMENTS[lift];
-    const ts = (mov && mov.tempoSpec) || { eccV: 0.45, stickFrac: 0.38 };
+    const ts = (mov && mov.tempoSpec) || { eccD: 1.8, concD: 1.4 };
 
     // Sample primary load coordinate across p in [0, 1] for both asc=false and asc=true
     const N = 40, tab = {};
@@ -2810,30 +2805,20 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
 
     const yRom = Math.abs(tab[false][N] - tab[false][0]);
     const rom = yRom > 0.04 ? yRom : Math.max(0.15, arcRom);
-    const vMax = lvMean(lift, pct);
-    const steady = pace === 'steady';
-    const vMean = steady ? Math.min(vMax, rom / 1.5) : vMax;
-    const heavy = steady ? 1 : smooth(0.55, 1.0, pct), dip = 0.85 * smooth(0.72, 1.0, pct);
-    const concAt = (c) => profile((x) => lerp(cr(SHAPE_LIGHT, x), cr(SHAPE_HEAVY, x), heavy) * (1 - dip * Math.exp(-Math.pow((x - c) / 0.12, 2))));
-
-    let sd = ts.stickFrac != null ? ts.stickFrac : 0.38;
-    const yT = ts.stickYByStyle && t && t.style ? ts.stickYByStyle[t.style] : null;
-    if (yT != null) {
-      let lo = 0.15, hi = 0.92;
-      for (let i = 0; i < 22; i++) { sd = (lo + hi) / 2; if (concAt(sd).q(sd) < yT) lo = sd; else hi = sd; }
-    }
-    const conc = concAt(sd);
+    // Consistent, load-independent controlled velocity profiles so phase timing and
+    // inertial comparisons stay apples-to-apples across styles, proportions, and loads.
+    const conc = profile((x) => cr(SHAPE_HEAVY, x));
     const ecc = profile((x) => cr(SHAPE_ECC, x));
     const land = profile((x) => cr(SHAPE_LAND, x));
     const explosive = profile((x) => cr(SHAPE_EXPLOSIVE, x));
     const catchProf = profile((x) => cr(SHAPE_CATCH, x));
 
     const segs = ts.segments
-      ? ts.segments(t, { rom, arcRom, vMean, vMax, pct, steady, conc, ecc, land, explosive, catchProf })
+      ? ts.segments(t, { rom, arcRom, conc, ecc, land, explosive, catchProf })
       : [
           { id: 'start', label: 'Start', hold: true, p: 0, d: 0.6, conc: false },
-          { id: 'conc', label: 'Lift', a: 0, b: 1, d: rom / vMean, prof: conc, conc: true, primaryConc: true, showOnScrub: true },
-          { id: 'ecc', label: 'Lower', a: 1, b: 0, d: Math.max(0.7, rom / (ts.eccV || 0.45)), prof: ecc, conc: false, showOnScrub: true },
+          { id: 'conc', label: 'Lift', a: 0, b: 1, d: ts.concD || 1.4, prof: conc, conc: true, primaryConc: true, showOnScrub: true },
+          { id: 'ecc', label: 'Lower', a: 1, b: 0, d: ts.eccD || 1.8, prof: ecc, conc: false, showOnScrub: true },
         ];
 
     let T = 0;
@@ -2846,15 +2831,15 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const cg = segs.find((g) => g.primaryConc) || segs.find((g) => g.conc) || segs[0];
     const eg = segs.find((g) => !g.hold && !g.conc);
     const Tc = cg ? cg.d : 1, Te = eg ? eg.d : 1;
-    const stickU = cg ? (cg.t0 + sd * cg.d) / T : 0.5;
+    const vMean = rom / Math.max(0.1, Tc);
     const concU = cg ? [cg.t0 / T, (cg.t0 + cg.d) / T] : [0, 1];
     const ysOf = (g) => tab[!!g.asc];
 
     const tp = {
-      lift, pct, pace, T, segs, rom, arcRom, vMean, vMax, Tc, Te, dip, stickU, concU, primaryConcU: concU,
+      lift, pct, T, segs, rom, arcRom, vMean, vMax: vMean, Tc, Te, dip: 0, stickU: cg ? (cg.t0 + 0.38 * cg.d) / T : 0.5, concU, primaryConcU: concU,
       vPeak: vMean * conc.vmax(),
-      vStick: dip > 0.05 ? vMean * conc.vmin(sd - 0.1, sd + 0.1) : null,
-      stickY: conc.q(sd),
+      vStick: null,
+      stickY: null,
       seg(u) {
         u = ((u % 1) + 1) % 1;
         const tt = u * T;
@@ -3777,18 +3762,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Front squats matched back squats for muscle recruitment with lower knee compressive forces and extensor moments. At the same load and depth this model shows the opposite at the knee, because keeping a front-racked bar over midfoot pushes the knees further forward. Their lifters may have squatted shallower or sat back more. ' + cite('gull'),
     ],
     tempoSpec: {
-      lvTable: 'squat',
-      eccV: 0.5,
-      stickFrac: 0.36,
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc }) {
-        const Tc = rom / vMean;
-        const Te = Math.max(0.7, (rom / (steady ? Math.min(0.5, rom / 2) : 0.5)) * (1 + 0.25 * pct));
+      segments(tech, { conc, ecc }) {
         return [
-          { id: 'stand',   label: 'Standing', shortLabel: 'Standing', hold: true, p: 0, d: 0.8,  conc: false },
-          { id: 'descent', label: 'Descent',  shortLabel: 'Descent',  a: 0, b: 1, d: Te, prof: ecc,  conc: false, asc: false, mapBy: 'height', showOnScrub: true },
-          { id: 'bottom',  label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.12, conc: false, rfe: true, showOnScrub: true },
-          { id: 'ascent',  label: 'Ascent',   shortLabel: 'Ascent',   a: 1, b: 0, d: Tc, prof: conc, conc: true,  asc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+          { id: 'stand',   label: 'Standing', shortLabel: 'Standing', hold: true, p: 0, d: 0.60, conc: false },
+          { id: 'descent', label: 'Descent',  shortLabel: 'Descent',  a: 0, b: 1, d: 2.00, prof: ecc,  conc: false, asc: false, mapBy: 'height', showOnScrub: true },
+          { id: 'bottom',  label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.15, conc: false, rfe: true, showOnScrub: true },
+          { id: 'ascent',  label: 'Ascent',   shortLabel: 'Ascent',   a: 1, b: 0, d: 1.50, prof: conc, conc: true,  asc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
         ];
       },
     },
@@ -3978,18 +3958,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Pec tears happen at the bottom. With the arm extended behind the body the lowest fibres are stretched and at a mechanical disadvantage in the last part of the lowering phase. ' + cite('wolf'),
     ],
     tempoSpec: {
-      lvTable: 'bench',
-      eccV: 0.38,
-      stickFrac: 0.34,
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc }) {
-        const Tc = rom / vMean;
-        const Te = Math.max(0.7, (rom / (steady ? Math.min(0.38, rom / 2) : 0.38)) * (1 + 0.25 * pct));
+      segments(tech, { conc, ecc }) {
         return [
-          { id: 'lockout', label: 'Lockout',        shortLabel: 'Lockout',  hold: true, p: 1, d: 0.8, conc: false },
-          { id: 'lower',   label: 'Lowering',       shortLabel: 'Lowering', a: 1, b: 0, d: Te, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
-          { id: 'pause',   label: 'Pause on chest', shortLabel: 'Pause',    hold: true, p: 0, d: 0.8, conc: false, showOnScrub: true },
-          { id: 'press',   label: 'Press',          shortLabel: 'Press',    a: 0, b: 1, d: Tc, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+          { id: 'lockout', label: 'Lockout',        shortLabel: 'Lockout',  hold: true, p: 1, d: 0.60, conc: false },
+          { id: 'lower',   label: 'Lowering',       shortLabel: 'Lowering', a: 1, b: 0, d: 1.80, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
+          { id: 'pause',   label: 'Pause on chest', shortLabel: 'Pause',    hold: true, p: 0, d: 0.60, conc: false, showOnScrub: true },
+          { id: 'press',   label: 'Press',          shortLabel: 'Press',    a: 0, b: 1, d: 1.40, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
         ];
       },
     },
@@ -4191,30 +4166,22 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Against the Romanian deadlift, the conventional pull produced more rectus femoris and gluteus maximus activity and larger knee and ankle torques. ' + cite('lee'),
     ],
     tempoSpec: {
-      lvTable: 'deadlift',
-      eccV: 0.7,
-      stickFrac: 0.46,
-      stickFracByStyle: { rdl: 0.42 },
-      stickYByStyle: { conv: 0.61, sumo: 0.56 },
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc, land }) {
-        const Tc = rom / vMean;
+      segments(tech, { conc, ecc, land }) {
         if (tech.style === 'rdl') {
-          const Te = Math.max(0.7, (rom / (steady ? Math.min(0.4, rom / 2) : 0.4)) * (1 + 0.25 * pct));
           return [
-            { id: 'stand',  label: 'Standing', shortLabel: 'Standing', hold: true, p: 0, d: 0.8,  conc: false },
-            { id: 'lower',  label: 'Lowering', shortLabel: 'Lowering', a: 0, b: 1, d: Te, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
-            { id: 'bottom', label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.12, conc: false, rfe: true, showOnScrub: true },
-            { id: 'pull',   label: 'Pull',     shortLabel: 'Pull',     a: 1, b: 0, d: Tc, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+            { id: 'stand',  label: 'Standing', shortLabel: 'Standing', hold: true, p: 0, d: 0.60, conc: false },
+            { id: 'lower',  label: 'Lowering', shortLabel: 'Lowering', a: 0, b: 1, d: 1.80, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
+            { id: 'bottom', label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.15, conc: false, rfe: true, showOnScrub: true },
+            { id: 'pull',   label: 'Pull',     shortLabel: 'Pull',     a: 1, b: 0, d: 1.40, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
           ];
         }
-        const Te = Math.max(0.7, (rom / (steady ? Math.min(0.7, rom / 2) : 0.7)) * (1 + 0.25 * pct));
         return [
-          { id: 'slack',   label: 'Taking the slack', shortLabel: 'Slack',    hold: true, p: 0, d: 0.8,      conc: false, ramp: (s) => smooth(0.15, 0.95, s) },
-          { id: 'pull',    label: 'Pull',             shortLabel: 'Pull',     a: 0, b: 1, d: Tc, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
-          { id: 'lockout', label: 'Lockout',          shortLabel: 'Lockout',  hold: true, p: 1, d: 0.7,      conc: false, showOnScrub: true },
-          { id: 'lower',   label: 'Lowering',         shortLabel: 'Lowering', a: 1, b: 0, d: Te * 0.8, prof: land, conc: false, mapBy: 'height', showOnScrub: true },
-          { id: 'floor',   label: 'On the floor',     shortLabel: 'Floor',    hold: true, p: 0, d: 0.6,      conc: false, ramp: (s) => 1 - smooth(0.2, 0.95, s) },
+          { id: 'slack',   label: 'Taking the slack', shortLabel: 'Slack',    hold: true, p: 0, d: 0.60, conc: false, ramp: (s) => smooth(0.15, 0.95, s) },
+          { id: 'pull',    label: 'Pull',             shortLabel: 'Pull',     a: 0, b: 1, d: 1.85, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+          { id: 'lockout', label: 'Lockout',          shortLabel: 'Lockout',  hold: true, p: 1, d: 0.60, conc: false, showOnScrub: true },
+          { id: 'lower',   label: 'Lowering',         shortLabel: 'Lowering', a: 1, b: 0, d: 1.15, prof: land, conc: false, mapBy: 'height', showOnScrub: true },
+          { id: 'floor',   label: 'On the floor',     shortLabel: 'Floor',    hold: true, p: 0, d: 0.50, conc: false, ramp: (s) => 1 - smooth(0.2, 0.95, s) },
         ];
       },
     },
@@ -4403,18 +4370,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Leaning back turns part of the press into an incline press: the moment at the shoulder falls, and the low back takes an extension load it does not have when you stand tall. Try the lean slider and watch the low-back ring.',
     ],
     tempoSpec: {
-      lvTable: 'ohp',
-      eccV: 0.45,
-      stickFrac: 0.4,
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc }) {
-        const Tc = rom / vMean;
-        const Te = Math.max(0.7, (rom / (steady ? Math.min(0.45, rom / 2) : 0.45)) * (1 + 0.25 * pct));
+      segments(tech, { conc, ecc }) {
         return [
-          { id: 'rack',    label: 'Rack position', shortLabel: 'Rack',     hold: true, p: 0, d: 0.8, conc: false },
-          { id: 'press',   label: 'Press',         shortLabel: 'Press',    a: 0, b: 1, d: Tc, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
-          { id: 'lockout', label: 'Lockout',       shortLabel: 'Lockout',  hold: true, p: 1, d: 0.5, conc: false, showOnScrub: true },
-          { id: 'lower',   label: 'Lowering',      shortLabel: 'Lowering', a: 1, b: 0, d: Te, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
+          { id: 'rack',    label: 'Rack position', shortLabel: 'Rack',     hold: true, p: 0, d: 0.60, conc: false },
+          { id: 'press',   label: 'Press',         shortLabel: 'Press',    a: 0, b: 1, d: 1.40, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+          { id: 'lockout', label: 'Lockout',       shortLabel: 'Lockout',  hold: true, p: 1, d: 0.50, conc: false, showOnScrub: true },
+          { id: 'lower',   label: 'Lowering',      shortLabel: 'Lowering', a: 1, b: 0, d: 1.70, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
         ];
       },
     },
@@ -4650,19 +4612,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Ankle position shifts the gastrocnemius share: plantarflexing the ankle (toes pointed) shortens the gastrocnemius into active insufficiency, forcing the hamstrings (especially biceps femoris short head and semitendinosus) to carry more of the knee flexion moment.',
     ],
     tempoSpec: {
-      lvTable: { pct: [0.35, 0.55, 0.75, 0.90, 1.0], v: [0.95, 0.76, 0.56, 0.38, 0.24] },
-      eccV: 0.42,
-      stickFrac: 0.65,
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc }) {
-        const arc = Math.max(0.35, rom);
-        const Tc = Math.max(0.55, arc / vMean);
-        const Te = Math.max(0.80, (arc / (steady ? Math.min(0.42, arc / 2) : 0.42)) * (1 + 0.20 * pct));
+      segments(tech, { conc, ecc }) {
         return [
-          { id: 'setup', label: 'Extended',     shortLabel: 'Start', hold: true, p: 0, d: 0.65, conc: false },
-          { id: 'curl',  label: 'Curl',         shortLabel: 'Curl',  a: 0, b: 1, d: Tc, prof: conc, conc: true,  dir: 1,  mapBy: 'param', primaryConc: true, showOnScrub: true },
+          { id: 'setup', label: 'Extended',     shortLabel: 'Start', hold: true, p: 0, d: 0.60, conc: false },
+          { id: 'curl',  label: 'Curl',         shortLabel: 'Curl',  a: 0, b: 1, d: 1.35, prof: conc, conc: true,  dir: 1,  mapBy: 'param', primaryConc: true, showOnScrub: true },
           { id: 'peak',  label: 'Peak squeeze', shortLabel: 'Peak',  hold: true, p: 1, d: 0.35, conc: false, showOnScrub: true },
-          { id: 'lower', label: 'Lowering',     shortLabel: 'Lower', a: 1, b: 0, d: Te, prof: ecc,  conc: false, dir: -1, mapBy: 'param', showOnScrub: true },
+          { id: 'lower', label: 'Lowering',     shortLabel: 'Lower', a: 1, b: 0, d: 1.70, prof: ecc,  conc: false, dir: -1, mapBy: 'param', showOnScrub: true },
         ];
       },
     },
@@ -5102,12 +5058,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Because the second pull is ballistic, peak vertical bar acceleration reaches 0.5–1.2 g and horizontal bar acceleration (S-curve sweep toward the hips, then slightly forward off thigh contact) shifts joint moments and center of pressure before unweighting in the turnover. ' + cite('gar93'),
     ],
     tempoSpec: {
-      lvTable: { pct: [0.35, 0.55, 0.75, 0.90, 1.0], v: [1.55, 1.38, 1.22, 1.08, 0.96] },
-      eccV: 0.85,
-      stickFrac: 0.35,
       horizontalInertia: true,
-      segments(tech, { pct, steady, conc, ecc }) {
-        const slow = steady ? 1.35 : 1.0;
+      segments(tech, { conc, ecc }) {
         const exp = FALLBACK_EXPLOSIVE;
         const cap = FALLBACK_CATCH;
         const fromFloor = tech.style === 'floor';
@@ -5115,16 +5067,16 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         const segs = [];
         if (fromFloor) {
           segs.push({ id: 'slack', label: 'Setup',      shortLabel: 'Setup',    hold: true, p: 0.0, d: 0.45, conc: false, ramp: (s) => smooth(0.15, 0.95, s) });
-          segs.push({ id: 'pull1', label: 'First pull', shortLabel: '1st pull', a: 0.00, b: 0.28, d: 0.50 * slow * (0.88 + 0.22 * pct), prof: conc, conc: true, dir: 1, mapBy: 'param', showOnScrub: true });
+          segs.push({ id: 'pull1', label: 'First pull', shortLabel: '1st pull', a: 0.00, b: 0.28, d: 0.52, prof: conc, conc: true, dir: 1, mapBy: 'param', showOnScrub: true });
         } else {
           segs.push({ id: 'hang', label: tech.style === 'blocks' ? 'Mid-thigh' : 'Hang position', shortLabel: tech.style === 'blocks' ? 'Blocks' : 'Hang', hold: true, p: pStart, d: 0.48, conc: false });
         }
-        const dPull2 = (tech.style === 'blocks' ? 0.26 : 0.36) * slow * (0.90 + 0.20 * pct);
-        segs.push({ id: 'pull2', label: 'Second pull',      shortLabel: '2nd pull', a: fromFloor ? 0.28 : pStart, b: 0.54, d: dPull2,      prof: exp,  conc: true,  dir: 1,  ballistic: true, mapBy: 'param', primaryConc: true, showOnScrub: true });
-        segs.push({ id: 'catch', label: 'Turnover & catch', shortLabel: 'Catch',    a: 0.54, b: 0.74, d: 0.42 * slow,                      prof: cap,  conc: false, dir: -1, ballistic: true, mapBy: 'param', showOnScrub: true });
-        segs.push({ id: 'stand', label: 'Recovery',         shortLabel: 'Stand',    a: 0.74, b: 0.90, d: 0.50 * slow * (0.85 + 0.25 * pct), prof: conc, conc: true,  dir: 1,  mapBy: 'param', showOnScrub: true });
+        const dPull2 = tech.style === 'blocks' ? 0.28 : 0.38;
+        segs.push({ id: 'pull2', label: 'Second pull',      shortLabel: '2nd pull', a: fromFloor ? 0.28 : pStart, b: 0.54, d: dPull2, prof: exp,  conc: true,  dir: 1,  ballistic: true, mapBy: 'param', primaryConc: true, showOnScrub: true });
+        segs.push({ id: 'catch', label: 'Turnover & catch', shortLabel: 'Catch',    a: 0.54, b: 0.74, d: 0.42,                      prof: cap,  conc: false, dir: -1, ballistic: true, mapBy: 'param', showOnScrub: true });
+        segs.push({ id: 'stand', label: 'Recovery',         shortLabel: 'Stand',    a: 0.74, b: 0.90, d: 0.52,                      prof: conc, conc: true,  dir: 1,  mapBy: 'param', showOnScrub: true });
         segs.push({ id: 'rack',  label: 'Front rack',       shortLabel: 'Rack',     hold: true, p: 0.90, d: 0.45, conc: false });
-        const dLower = (fromFloor ? 1.48 : 1.15) * slow;
+        const dLower = fromFloor ? 1.48 : 1.15;
         segs.push({ id: 'lower', label: 'Return to floor',  shortLabel: 'Lower',    a: 0.90, b: pStart, d: dLower, prof: ecc, conc: false, dir: -1, mapBy: 'param' });
         if (fromFloor) {
           segs.push({ id: 'floor', label: 'On the floor', shortLabel: 'Floor', hold: true, p: 0.0, d: 0.40, conc: false, ramp: (s) => 1 - smooth(0.2, 0.95, s) });
@@ -5394,18 +5346,13 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       'Deepening the dip below 90° of elbow flexion stretches the anterior deltoid and lower/mid pecs into shoulder extension, sharply raising bottom-position shoulder torque while keeping the spine decompressed in traction. ' + cite('bag15'),
     ],
     tempoSpec: {
-      lvTable: { pct: [0.40, 0.60, 0.75, 0.90, 1.0], v: [0.76, 0.58, 0.44, 0.30, 0.19] },
-      eccV: 0.42,
-      stickFrac: 0.30,
       horizontalInertia: false,
-      segments(tech, { rom, vMean, pct, steady, conc, ecc }) {
-        const Tc = Math.max(0.45, rom / Math.max(0.12, vMean));
-        const Te = Math.max(0.75, (rom / (steady ? Math.min(0.42, rom / 2) : 0.42)) * (1 + 0.22 * pct));
+      segments(tech, { conc, ecc }) {
         return [
-          { id: 'top',   label: 'Lockout',  shortLabel: 'Lockout',  hold: true, p: 0, d: 0.40, conc: false },
-          { id: 'lower', label: 'Lowering', shortLabel: 'Lowering', a: 0, b: 1, d: Te, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
-          { id: 'bot',   label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.25, conc: false, rfe: true, showOnScrub: true },
-          { id: 'press', label: 'Press',    shortLabel: 'Press',    a: 1, b: 0, d: Tc, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
+          { id: 'top',   label: 'Lockout',  shortLabel: 'Lockout',  hold: true, p: 0, d: 0.45, conc: false },
+          { id: 'lower', label: 'Lowering', shortLabel: 'Lowering', a: 0, b: 1, d: 1.70, prof: ecc,  conc: false, mapBy: 'height', showOnScrub: true },
+          { id: 'bot',   label: 'Bottom',   shortLabel: 'Bottom',   hold: true, p: 1, d: 0.20, conc: false, rfe: true, showOnScrub: true },
+          { id: 'press', label: 'Press',    shortLabel: 'Press',    a: 1, b: 0, d: 1.35, prof: conc, conc: true,  mapBy: 'height', primaryConc: true, showOnScrub: true },
         ];
       },
     },
@@ -6715,8 +6662,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   LAB.ATLAS = { A, ORIGIN_DISTAL };
 })();
 
-// generated by tools/checks.cjs on 2026-11-25 — do not edit
-(function () { const LAB = (globalThis.LAB = globalThis.LAB || {}); LAB.CHECKS = {"lifter":{"height":178,"mass":81},"refs":{"squat":150,"bench":110,"deadlift":200,"ohp":65},"checks":[{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, conventional deadlift","study":0.976,"model":0.619,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, conventional deadlift","study":0.995,"model":0.637,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, conventional deadlift","study":0.655,"model":0.502,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, conventional deadlift","study":0.885,"model":0.475,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, conventional deadlift","study":0.909,"model":2.599,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, conventional deadlift","study":0.991,"model":0.735,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, sumo deadlift","study":1.042,"model":0.782,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, sumo deadlift","study":0.98,"model":0.838,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, sumo deadlift","study":0.669,"model":0.503,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, sumo deadlift","study":0.632,"model":0.535,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, sumo deadlift","study":0.928,"model":null,"note":"the model barely uses it below the knees","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, sumo deadlift","study":0.897,"model":0.843,"note":"","tol":0.2,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, conventional deadlift","study":1.27,"model":1.354,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, sumo deadlift","study":1.27,"model":1.373,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, trap-bar deadlift","study":1.591,"model":1.392,"tol":0.3,"ok":true},{"src":"lee18","kind":"exercise","label":"Glutes: Romanian ÷ conventional deadlift","study":0.91,"model":0.957,"tol":0.2,"ok":true},{"src":"lee18","kind":"exercise","label":"Front quad: Romanian ÷ conventional deadlift","study":0.431,"model":0.239,"tol":0.2,"ok":true},{"src":"andersen18","kind":"exercise","label":"Outer hamstring: trap-bar ÷ conventional deadlift","study":0.781,"model":0.957,"tol":0.15,"ok":false},{"src":"ridao20","kind":"exercise","label":"Front shoulder: 30° incline ÷ flat bench","study":1.269,"model":1.502,"tol":0.25,"ok":true},{"src":"larsen21","kind":"strength","label":"Max bench, close grip ÷ standard","study":0.952,"model":0.697,"note":"narrow vs medium grip, same lifters","tol":0.06,"ok":false},{"src":"larsen21","kind":"strength","label":"Max bench, wide grip ÷ standard","study":1.008,"model":0.997,"note":"wide vs medium grip, same lifters","tol":0.06,"ok":true},{"src":"ridao20","kind":"strength","label":"Max bench, 30° incline ÷ standard","study":0.778,"model":0.794,"note":"30° incline vs flat, same lifters","tol":0.06,"ok":true},{"src":"andersen18","kind":"strength","label":"Max deadlift, trap bar ÷ standard","study":1.019,"model":0.959,"note":"hex bar vs barbell, same lifters","tol":0.06,"ok":true},{"src":"coratella22","kind":"strength","label":"Max overhead press, behind the neck ÷ standard","study":0.927,"model":0.537,"note":"behind the neck vs front, same lifters","tol":0.06,"ok":false}],"dyn":[{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 1RM, full back squat, m/s","study":0.32,"model":0.26,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"sanchez17","kind":"speed","label":"Mean concentric speed, mean propulsive speed at 70% 1RM, m/s","study":0.82,"model":0.63,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"gonzalez10","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.16,"model":0.18,"tol":0.07,"note":"model uses Fahs 2019","ok":true},{"src":"benavides20","kind":"speed","label":"Mean concentric speed, mean speed at 1RM, m/s","study":0.33,"model":0.22,"tol":0.07,"note":"model uses Fahs 2019","ok":false},{"src":"shoji25","kind":"bend","label":"Hip-to-bar lever, deadlift at 90% ÷ 60% 1RM","study":0.95,"model":0.951,"tol":0.02,"ok":true},{"src":"escamilla01","kind":"rom","label":"Bar travel, sumo ÷ conventional deadlift","study":0.9,"model":0.926,"tol":0.05,"note":"the national-meet summary gives 0.82 (Cissik on Escamilla 2000)","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max conventional deadlift, share of bar travel","study":0.61,"model":0.61,"tol":0.03,"note":"set from this","ok":true},{"src":"cissik","kind":"stick","label":"Slowest point of a max sumo deadlift, share of bar travel","study":0.56,"model":0.56,"tol":0.03,"note":"set from this","ok":true},{"src":"swinton11","kind":"scale","label":"Peak low-back moment, deadlift at 80% ÷ 10% 1RM","study":1.824,"model":2.343,"tol":0.3,"ok":false},{"src":"chol","kind":"moment","label":"Peak low-back moment, 90 kg lifter, 260 kg conventional deadlift at max speed, N·m","study":988,"model":1029.421,"tol":120,"ok":true},{"src":"chol","kind":"moment","label":"Sumo ÷ conventional peak low-back moment","study":0.9,"model":0.803,"tol":0.06,"ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 50% pushed as fast as possible","study":1,"model":0.995,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 70% pushed as fast as possible","study":1,"model":1.019,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, squat at 85% pushed as fast as possible","study":1,"model":1.052,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 50% pushed as fast as possible","study":1,"model":0.978,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 70% pushed as fast as possible","study":1,"model":1.048,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, bench at 85% pushed as fast as possible","study":1,"model":1.09,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 50% pushed as fast as possible","study":1,"model":0.896,"tol":0.1,"note":"","ok":false},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 70% pushed as fast as possible","study":1,"model":0.911,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, deadlift at 85% pushed as fast as possible","study":1,"model":0.963,"tol":0.1,"note":"","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 50% pushed as fast as possible","study":1,"model":0.977,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 70% pushed as fast as possible","study":1,"model":0.965,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true},{"src":"fahs19","kind":"intent","label":"Peak effort, overhead press at 85% pushed as fast as possible","study":1,"model":0.946,"tol":0.1,"note":"fitted: the arm speed-strength slope was set from these rows","ok":true}]}; })();
+// generated by tools/checks.cjs on 2026-11-26 — do not edit
+(function () { const LAB = (globalThis.LAB = globalThis.LAB || {}); LAB.CHECKS = {"lifter":{"height":178,"mass":81},"refs":{"squat":150,"bench":110,"deadlift":200,"ohp":65},"checks":[{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, conventional deadlift","study":0.976,"model":0.721,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, conventional deadlift","study":0.995,"model":0.742,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, conventional deadlift","study":0.655,"model":0.589,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, conventional deadlift","study":0.885,"model":0.558,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, conventional deadlift","study":0.909,"model":2.522,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, conventional deadlift","study":0.991,"model":0.806,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Gluteus maximus (main buttock): effort above the knees ÷ below, sumo deadlift","study":1.042,"model":0.834,"note":"","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Biceps femoris, long head (outer hamstring): effort above the knees ÷ below, sumo deadlift","study":0.98,"model":0.886,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Adductor magnus (big inner thigh): effort above the knees ÷ below, sumo deadlift","study":0.669,"model":0.586,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Vastus lateralis (outer quad): effort above the knees ÷ below, sumo deadlift","study":0.632,"model":0.623,"note":"","tol":0.2,"ok":true},{"src":"hanen25","kind":"profile","label":"Gastrocnemius (calf): effort above the knees ÷ below, sumo deadlift","study":0.928,"model":null,"note":"the model barely uses it below the knees","tol":0.2,"ok":false},{"src":"hanen25","kind":"profile","label":"Longissimus, lumbar fibres (low-back erector): effort above the knees ÷ below, sumo deadlift","study":0.897,"model":0.884,"note":"","tol":0.2,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, conventional deadlift","study":1.27,"model":1.357,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, sumo deadlift","study":1.27,"model":1.375,"tol":0.3,"ok":true},{"src":"fletcher25","kind":"pair","label":"Glutes ÷ outer hamstring, trap-bar deadlift","study":1.591,"model":1.393,"tol":0.3,"ok":true},{"src":"lee18","kind":"exercise","label":"Glutes: Romanian ÷ conventional deadlift","study":0.91,"model":0.971,"tol":0.2,"ok":true},{"src":"lee18","kind":"exercise","label":"Front quad: Romanian ÷ conventional deadlift","study":0.431,"model":0.217,"tol":0.2,"ok":false},{"src":"andersen18","kind":"exercise","label":"Outer hamstring: trap-bar ÷ conventional deadlift","study":0.781,"model":0.936,"tol":0.15,"ok":false},{"src":"ridao20","kind":"exercise","label":"Front shoulder: 30° incline ÷ flat bench","study":1.269,"model":1.516,"tol":0.25,"ok":true},{"src":"larsen21","kind":"strength","label":"Max bench, close grip ÷ standard","study":0.952,"model":0.691,"note":"narrow vs medium grip, same lifters","tol":0.06,"ok":false},{"src":"larsen21","kind":"strength","label":"Max bench, wide grip ÷ standard","study":1.008,"model":1.022,"note":"wide vs medium grip, same lifters","tol":0.06,"ok":true},{"src":"ridao20","kind":"strength","label":"Max bench, 30° incline ÷ standard","study":0.778,"model":0.743,"note":"30° incline vs flat, same lifters","tol":0.06,"ok":true},{"src":"andersen18","kind":"strength","label":"Max deadlift, trap bar ÷ standard","study":1.019,"model":0.908,"note":"hex bar vs barbell, same lifters","tol":0.06,"ok":false},{"src":"coratella22","kind":"strength","label":"Max overhead press, behind the neck ÷ standard","study":0.927,"model":0.536,"note":"behind the neck vs front, same lifters","tol":0.06,"ok":false}],"dyn":[{"src":"shoji25","kind":"bend","label":"Hip-to-bar lever, deadlift at 90% ÷ 60% 1RM","study":0.95,"model":0.937,"tol":0.02,"ok":true},{"src":"escamilla01","kind":"rom","label":"Bar travel, sumo ÷ conventional deadlift","study":0.9,"model":0.926,"tol":0.05,"note":"the national-meet summary gives 0.82 (Cissik on Escamilla 2000)","ok":true},{"src":"swinton11","kind":"scale","label":"Peak low-back moment, deadlift at 80% ÷ 10% 1RM","study":1.824,"model":3.482,"tol":0.3,"ok":false},{"src":"chol","kind":"moment","label":"Peak low-back moment, 90 kg lifter, 260 kg conventional deadlift, N·m","study":988,"model":1072.819,"tol":120,"ok":true},{"src":"chol","kind":"moment","label":"Sumo ÷ conventional peak low-back moment","study":0.9,"model":0.792,"tol":0.06,"ok":false}]}; })();
 
 /* msk: whole-body muscle-level static optimization.
    Each frame all active joint moments and girdle/grip forces from inverse dynamics are shared among
@@ -11817,7 +11764,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     mode: 'single', lift: (movList()[0] && movList()[0].id) || 'squat', variant: initVariant, tune: initTune,
     load: initLoad, unit: 'kg',
     lifter: { height: 175, mass: 80, femur: null, shank: null, upper: null, forearm: null, hand: null, torsoCm: null, shoulderW: null, torso: 1 }, refs: null, refsAuto: true,
-    u: 0, playing: !RM, speed: 1, pace: 'max', layer: 2, layerTo: 2, forces: true, sel: null, selJoint: null, pickStack: null, mQuery: '', moveQuery: '', moveCat: 'all', popQuery: '', tab: 'now', paint: 'effort',
+    u: 0, playing: !RM, speed: 1, layer: 2, layerTo: 2, forces: true, sel: null, selJoint: null, pickStack: null, mQuery: '', moveQuery: '', moveCat: 'all', popQuery: '', tab: 'now', paint: 'effort',
     cmp: { a: { lift: 'deadlift', variant: 'conv' }, b: { lift: 'deadlift', variant: 'sumo' }, link: 'kg', kg: 180, pct: 0.8, overlay: false, preset: 'sumo' },
   };
   const refsDefault = (m, old) => {
@@ -11853,11 +11800,10 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
         }
       }
       S.intro = !!sv.intro || !sv.refsAuto;
-      if (sv.pace === 'steady') S.pace = 'steady';
       if (sv.refs && !sv.refsAuto) { S.refs = Object.assign(refsDefault(S.lifter.mass), sv.refs); S.refsAuto = false; }
     }
   } catch (e) { /* storage is optional */ }
-  const save = () => { try { localStorage.setItem('barbell-anatomy-lab', JSON.stringify({ unit: S.unit, lifter: S.lifter, refs: S.refs, refsAuto: S.refsAuto, intro: S.intro, pace: S.pace })); } catch (e) { /* ignore */ } };
+  const save = () => { try { localStorage.setItem('barbell-anatomy-lab', JSON.stringify({ unit: S.unit, lifter: S.lifter, refs: S.refs, refsAuto: S.refsAuto, intro: S.intro })); } catch (e) { /* ignore */ } };
   if (!S.refs) S.refs = refsDefault(S.lifter.mass);
 
   let cmpRep = null;
@@ -11922,8 +11868,8 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       chk: 'Muscle activity is compared with EMG across lifts, variants and phases in How it works. EMG shows activation, not force, so the force itself is unchecked.' },
     effort: { t: 'Effort',
       why: 'Effort is a muscle\'s force as a share of what it could produce at that length and speed, so it carries every estimate behind the force.',
-      how: 'Force divided by strength × force-length × force-velocity. Strength is fitted so the maxes you entered reach 100% at their hardest instant, lifted at true-max speed. Lifting, strength falls with joint speed (isokinetic norms for legs and trunk, fitted for shoulder and elbow); lowering, it is 1.2 times isometric (low end of Hollander 2007).',
-      chk: 'If speed and strength were modelled perfectly, a lighter load pushed as fast as possible would also peak near 100%. How it works shows how close each lift comes.' },
+      how: 'Force divided by strength × force-length × force-velocity. Strength is fitted so the maxes you entered reach 100% at their hardest instant at the same controlled tempo. Lifting, strength falls modestly with shortening speed (isokinetic norms); lowering, eccentric capacity is 1.2 times isometric (low end of Hollander 2007).',
+      chk: 'Muscle effort scales cleanly with weight and leverage across styles because every rep runs at the same consistent tempo.' },
     disc: { t: 'Spinal disc load',
       why: 'Disc load cannot be measured in lifters. A pressure needle in the disc has only been used in a few volunteers at light loads.',
       how: 'The sum of the modelled back-muscle and abdominal forces along the spine plus the weight above L5/S1, so it carries the muscle-force estimates. Shear is the forward pull of the weight above less the backward pull of the deep back muscles.',
@@ -11937,17 +11883,17 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       how: 'Quad tendon force is the sum of the modelled quad forces. Kneecap joint force is that times a ratio that grows with knee bend (about 1 by 90°), following published kneecap mechanics models.',
       chk: 'Not checked against measurements.' },
     barF: { t: 'Force on the bar',
-      why: 'The bar\'s weight is exact. The extra force that speeds it up or slows it down depends on its acceleration, which is estimated.',
-      how: 'Newton\'s second law: mass × (g + acceleration). Average lifting speed at each share of your max is measured (Fahs 2019, 51 lifters, four lifts). The speed\'s shape inside the rep (fast start, sticking-region dip near a max, coasting at light loads) is a smooth curve following published patterns, not a recording.',
-      chk: 'CHK_SPEED' },
+      why: 'The bar\'s weight is exact. The extra force that speeds it up or slows it down depends on its acceleration along the modelled tempo curve.',
+      how: 'Newton\'s second law: mass × (g + acceleration). Every style and weight of a lift uses the same smooth, controlled tempo so force and lever comparisons stay apples-to-apples.',
+      chk: 'Peak low-back moment scaling with load (Swinton 2011) and heavy deadlift moments (Cholewicki 1991) are checked in How it works.' },
     grf: { t: 'Floor reaction',
       why: 'There is no force plate under you.',
       how: 'Body weight plus the force on the bar plus the vertical inertia of every segment, split evenly between the feet. Where it acts under the foot comes from the moment balance.',
       chk: 'Exact for the posture and speed shown, so it carries their uncertainty.' },
     speed: { t: 'Bar speed',
-      why: 'Average speed is measured; the moment-to-moment speed is shaped.',
-      how: 'Average lifting speed at your share of max from Fahs 2019 (51 lifters). The shape inside the rep follows published patterns: a fast start and a coast to the top at light loads (Sánchez-Medina 2010), a sticking-region dip near a max (Kompf 2016). In deadlifts the dip sits where national-level lifters stalled: 61% of the way up in conventional, 56% in sumo (Escamilla 2000, from a secondary summary because the paper itself could not be read). In other lifts its position is set by hand. Lowering speed is not standardised in studies and is set to typical values.',
-      chk: 'CHK_SPEED' },
+      why: 'Bar speed comes from the lift\'s controlled tempo curve and your range of motion, not from a velocity tracker.',
+      how: 'Each movement uses a consistent, load-independent controlled tempo (athletic timing for the power clean) with smooth acceleration and deceleration so switching styles or weights never shifts the timeline.',
+      chk: 'Not a velocity-based training prediction; designed for consistent mechanical comparisons.' },
   };
   const E = (k) => '<sup class="est" tabindex="0" role="button" data-k="' + k + '" aria-label="' + esc(PROV[k].t) + ' is an estimate: show why">*</sup>';
   // the note: hover or focus on a pointer device, tap on touch; Escape or a tap elsewhere closes it
@@ -11955,8 +11901,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   tip.className = 'tip'; tip.id = 'tip'; tip.setAttribute('role', 'tooltip'); tip.hidden = true;
   document.body.appendChild(tip);
   let tipFor = null, tipPinned = false;
-  const chkText = (c) => c === 'CHK_JOINT' ? 'In How it works: the peak low-back moment for a 90 kg lifter pulling 260 kg against the 988 N·m group mean measured at a national meet (Cholewicki 1991). Hip and knee moments against Wretenberg 1996 and Fry 2003 are in the Technique tab notes.'
-    : c === 'CHK_SPEED' ? 'Speeds at a true max from other studies, set against the table used here: ' + L.EVIDENCE.LV_CHECKS.map((x) => L.EVIDENCE.SOURCES[x.src].cite + ' ' + x.v.toFixed(2) + ' m/s (' + x.lift + ', ' + Math.round(x.pct * 100) + '%) against ' + L.lvMean(x.lift, x.pct).toFixed(2)).join('; ') + '.' : c;
+  const chkText = (c) => c === 'CHK_JOINT' ? 'In How it works: the peak low-back moment for a 90 kg lifter pulling 260 kg against the 988 N·m group mean measured at a national meet (Cholewicki 1991). Hip and knee moments against Wretenberg 1996 and Fry 2003 are in the Technique tab notes.' : c;
   function showTip(el, pin) {
     const p = PROV[el.dataset.k]; if (!p) return;
     tipFor = el; tipPinned = !!pin;
@@ -12023,7 +11968,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     estCache.set(key, o);
     return o;
   }
-  const tempoFor = (c) => L.tempo(body, c.lift, techOf(c), estOf(c).pct, c.load, S.pace);
+  const tempoFor = (c) => L.tempo(body, c.lift, techOf(c), estOf(c).pct, c.load);
   function computeFor(c, u, tp) {
     const t = techOf(c), load = c.load;
     tp = tp || tempoFor(c);
@@ -12708,7 +12653,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   function leverRep(row) {
     if (!rep || !rep.tp || S.mode !== 'single') return null;
     const r = leverRow(row); if (!r) return null;
-    const c = single(), key = JSON.stringify([c, row.id, S.pace]);
+    const c = single(), key = JSON.stringify([c, row.id]);
     if (leverCache.has(key)) return leverCache.get(key);
     const cu = rep.tp.primaryConcU || rep.tp.concU;
     if (!cu) return null;
@@ -12926,7 +12871,25 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   }
   $('variants').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setVariant(b.dataset.v); });
   function setVariant(k) {
+    // Preserve the exact phase and progress within that phase when switching styles
+    let prevSegId = null, prevFrac = 0;
+    if (body) {
+      const oldTp = (rep && rep.tp) || tempoFor(single());
+      const oldSeg = oldTp && oldTp.seg ? oldTp.seg(S.u) : null;
+      if (oldSeg && oldSeg.d > 1e-6) {
+        prevSegId = oldSeg.id;
+        prevFrac = clamp((((S.u % 1) + 1) % 1 * oldTp.T - oldSeg.t0) / oldSeg.d, 0, 1);
+      }
+    }
     S.variant[S.lift] = k; S.tune[S.lift] = {};
+    if (body && prevSegId) {
+      const newTp = tempoFor(single());
+      const match = newTp && newTp.segs && newTp.segs.find((g) => g.id === prevSegId);
+      if (match && newTp.T > 1e-6) {
+        S.u = clamp((match.t0 + prevFrac * match.d) / newTp.T, 0, 0.9999);
+        $('scrub').value = Math.round(S.u * 1000);
+      }
+    }
     buildVariants(); buildTune(); paintScrub(); touchConfig(true);
   }
   function setLift(lift, fromHash) {
@@ -12976,7 +12939,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     const bigUnit = isBW && rep.est < 0.1 ? '' : uName();
     $('limit').innerHTML = '<span class="cap">Your estimated max in this style' + (S.refsAuto ? ', from typical numbers' : '') + '</span><span class="big">' + bigNum + (bigUnit ? '<small>' + bigUnit + '</small>' : '') + '</span>' +
       '<p>What gives out first: <button type="button" data-row="' + id + '" data-u="' + rep.soAt + '">' + esc(lc(nameOf(id))) + '</button>, ' + Math.round(rep.soAt * 100) + '% of the way through the rep (' + esc(lc(rep.soPhase)) + (pos ? ', ' + pos : '') + '). ' +
-      (over ? 'At ' + curLoadTxt + ' you are past this max: the rep shown is a grinder at true-max speed.' : curLoadTxt + ' is ' + pct(rep.pct) + ' of this max, so ' + (S.pace === 'max' ? 'pushed as fast as you can the ' + esc(noun) + ' moves at ' + rep.tp.vMean.toFixed(2) + ' m/s on average' : 'the ' + esc(noun) + ' moves at a controlled ' + rep.tp.vMean.toFixed(2) + ' m/s') + '.') + '</p>';
+      (over ? 'At ' + curLoadTxt + ' you are past this estimated max.' : curLoadTxt + ' is ' + pct(rep.pct) + ' of this max, moving at a controlled ' + rep.tp.vMean.toFixed(2) + ' m/s on average.') + '</p>';
   }
   $('limit').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-row]'); if (!b) return;
@@ -13779,9 +13742,9 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
   $('method').innerHTML = [
     '<p><b>Posture is solved, not drawn.</b> In the squat the knee angle drives the rep and the torso takes whatever angle puts the combined centre of mass of you and the bar over midfoot. In the deadlift the bar rises over midfoot with straight arms. In the bench the bar travels from its touch point to above the shoulder. In the overhead press the bar travels a path that clears your face and finishes over the middle of the foot, and you sway at the ankles to stay balanced. Change a limb length and every angle is recomputed.</p>',
     '<p><b>Every force is marked.</b> No muscle or joint force on this page is measured on you; most cannot be measured in anyone. Each carries an asterisk: hover or tap it to see why it is an estimate, how it is worked out and what it was checked against.</p>',
-    '<p><b>Speed follows the load.</b> The closer the bar is to your max, the slower it moves. Average lifting speed at each share of 1RM comes from a load-velocity study of 51 lifters in all four lifts ' + srcE('fahs19') + ': 0.18 to 0.26 m/s at a max, 0.47 to 0.65 m/s at 75%, 0.78 to 1.11 m/s at 45%. Inside the rep the speed has a shape: light loads shoot up and then coast to the top, so the push drops off before lockout ' + srcE('sanchez10') + '; near a max the bar slows in the sticking region and grinds through ' + srcE('kompf16') + '. In deadlifts the slowest point sits where national-level lifters stalled, about 61% of the way up in conventional and 56% in sumo ' + srcE('escamilla00') + ' (figures from ' + srcE('cissik') + ', as the paper itself could not be read). The sumo stance, toe-out and grip are the widths those lifters used. Elsewhere the dip\'s position is set by hand. Your share of max is the weight on the bar against the max the model predicts for this exact setup. <i>Max speed</i> pushes every rep as hard as possible, as the speed tables assume; <i>Controlled</i> takes at least about 1.5 seconds to lift and 2 to lower.</p>',
-    '<p><b>Forces include acceleration.</b> Joint moments come from inverse dynamics: force times lever arm over the bar and each body segment (segment masses from Winter), with each mass carrying gravity plus its own vertical acceleration at the speed shown. Speeding the bar up out of the bottom costs more than its weight; coasting to lockout costs less. Horizontal momentum is left out, because the posture model is quasi-static and cannot shift your hips to ride it as you would. Open any joint in the Joints tab to see the arithmetic.</p>',
-    '<p><b>Strength depends on speed.</b> A shortening muscle is weaker the faster it shortens. For the legs and trunk the drop follows isokinetic norms, which fall close to a straight line ' + srcE('grbic17') + ': torque at 180°/s about 70% of that at 60°/s, reaching zero near 8 rad/s. Lowering, strength barely changes with speed ' + srcE('westing88') + ' but sits above lifting strength: eccentric maxes in multi-joint lifts run 20 to 60% above concentric ones ' + srcE('hollander07') + ', so lowering and the brief turnaround at the bottom get the low end, 1.2 times. For the shoulder and elbow no comparable norm was found, so their slope is fitted so that bench and press reps pushed as fast as possible peak near 100%. That fit is labelled in the checks below. A consequence worth knowing: pushed as fast as possible, a 60% load asks nearly as much of the hardest-working muscle as a max does; the difference shows up as bar speed.</p>',
+    '<p><b>Consistent controlled tempo.</b> Every style and weight of a lift runs on the same smooth, controlled tempo (athletic timing for the power clean) so switching between variants like High-bar, Low-bar and Front squat or changing the weight keeps every phase aligned on the timeline and lets you compare leverage and muscle loading apples-to-apples without hidden speed changes.</p>',
+    '<p><b>Forces include acceleration.</b> Joint moments come from inverse dynamics: force times lever arm over the bar and each body segment (segment masses from Winter), with each mass carrying gravity plus its own vertical acceleration along the tempo curve. Speeding the bar up out of the bottom costs slightly more than its weight; slowing into lockout costs slightly less. Horizontal inertia is included for ballistic lifts like the power clean. Open any joint in the Joints tab to see the arithmetic.</p>',
+    '<p><b>Strength depends on speed.</b> A shortening muscle is slightly weaker the faster it shortens. For the legs and trunk the drop follows isokinetic norms ' + srcE('grbic17') + ': torque at 180°/s about 70% of that at 60°/s, reaching zero near 8 rad/s. Lowering, strength barely changes with speed ' + srcE('westing88') + ' and sits above lifting strength: eccentric maxes in multi-joint lifts run 20 to 60% above concentric ones ' + srcE('hollander07') + ', so lowering and the brief turnaround at the bottom get the low end, 1.2 times.</p>',
     '<p><b>The body bends under load.</b> Heavier deadlifts are pulled with more lower-thoracic and upper-lumbar rounding ' + srcE('shoji25') + ' ' + srcE('gundersen25') + '. Neither study gives the angles, so the amount is set to reproduce the one number they do give: the hip-to-bar lever shrinking about 5% from 60% to 90% of 1RM ' + srcE('shoji25') + '. Squats get about a third of that. Muscles thicken as they shorten (constant volume) and as they contract. The bar bends like the steel beam it is (28.5 mm shaft, sleeves treated as rigid), at real size: about a centimetre at the plates for a heavy deadlift, more for a squat, where it sits on your back.</p>',
     '<p><b>Muscle forces come from static optimization</b>, the method OpenSim uses: at every instant the model finds the set of muscle forces that produces exactly the joint moments while keeping the sum of squared activations as small as possible ' + cite('crown') + ' ' + cite('ander') + '. Hip, knee and ankle are solved together, so the hamstrings\' pull on the knee has to be cancelled by the quads. The low back is solved at L5/S1 and at T12/L1 together with the arms, because the latissimus dorsi crosses both the shoulder and the spine.</p>',
     '<p><b>Where the numbers come from.</b> Leg muscle strengths and lever arms follow the MRI-based Rajagopal model ' + cite('raj') + ', with glute and adductor lever arms updated from ' + cite('vig') + '; arm muscles follow ' + cite('holz') + '; back muscles ' + cite('bog92') + ' ' + cite('chris') + '. Shoulder leverage is taken from cadaver measurements across the range of motion ' + cite('ack08') + ' ' + cite('kue97') + ' rather than from the drawn muscle lines. Each muscle group is scaled so its peak matches measured strength of an untrained adult of your mass. One exception: that model made the deep quad (vastus intermedius) the weakest of the four quads, below rectus femoris, which dissection contradicts. It is set from cadaver cross-sections instead, at 16.7 cm² against 35.1 for the outer quad and 13.5 for rectus femoris ' + srcE('ward09') + '. Its surface EMG cannot be recorded, so no %MVIC ratio exists for it; it is assumed to work as hard as the other vasti, which fits the few studies that reached it with special electrodes ' + srcE('akima23') + ' ' + srcE('kawai15') + '. Those also find it working relatively harder with the knee deeply bent, which the model does not reproduce: it gives all three vasti the same length curve.</p>',
@@ -13789,7 +13752,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     '<p><b>Why a muscle drives the lift or not.</b> Select any leg muscle to see where it attaches and, at each joint it crosses, which way its pull turns that joint: green where that is what the lift needs at that instant, orange where it works against it. Below that, how much it shortens over the lift, joint by joint. Rectus femoris and the hamstrings each cross two joints that move in opposite senses for them, so standing up out of a squat they shorten only about a quarter as much as a muscle crossing one joint, and do about a quarter of the work per newton of pull.</p>',
     '<p><b>What 100% means.</b> Your four maxes set it. The model raises each group\'s strength until none of your maxes asks more than 100% of any muscle, so at your max the limiting muscle reads 100%. If a max is lower than your other lifts predict, the gap is treated as skill specific to that lift ' + cite('buck') + '. Strength also transfers only partly between lifts: each lift gets the strength its own max proves plus half of any extra your other lifts show, so a big deadlift does not make low-bar squatting look free. Another style of the same lift at the same weight can read over 100%: that is a prediction that you could not lift it that way.</p>',
     '<p><b>Not optimized.</b> Muscles that stabilise rather than move a joint in this model (shoulder blade muscles, deep hip rotators, grip, neck, pelvic floor) and abdominal bracing follow rules scaled to load, set from EMG studies. They are marked as holding position.</p>',
-    '<p><b>How it checks out.</b> A 90 kg lifter pulling 260 kg conventional at max speed gets a peak low-back moment of about ' + chk('Peak low-back moment, 90 kg', (v) => fN(Math.round(v / 10) * 10)) + ' N·m here; the highest group average measured at a national meet was 988 N·m. Sumo lowers it by about ' + chk('Sumo ÷ conventional peak', (v) => Math.round((1 - v) * 100)) + '% in the model against 10% measured ' + cite('chol') + '. Sumo against conventional shifts work toward the vasti and away from the spinal erectors and hamstrings, as EMG shows ' + cite('esc02') + ' ' + cite('hanen') + '. Pressing behind the neck moves work to the middle and rear deltoid ' + cite('cora') + '.</p>',
+    '<p><b>How it checks out.</b> A 90 kg lifter pulling 260 kg conventional gets a peak low-back moment of about ' + chk('Peak low-back moment, 90 kg', (v) => fN(Math.round(v / 10) * 10)) + ' N·m here; the highest group average measured at a national meet was 988 N·m. Sumo lowers it by about ' + chk('Sumo ÷ conventional peak', (v) => Math.round((1 - v) * 100)) + '% in the model against 10% measured ' + cite('chol') + '. Sumo against conventional shifts work toward the vasti and away from the spinal erectors and hamstrings, as EMG shows ' + cite('esc02') + ' ' + cite('hanen') + '. Pressing behind the neck moves work to the middle and rear deltoid ' + cite('cora') + '.</p>',
     '<p><b>Shoulder variants.</b> Two fixes brought most pressing styles into line. The forearm is stacked under the bar seen from the feet, as lifters do, instead of slanting in; and muscles that do not wrap the humeral head (pectorals, deltoid, lats) lose their twisting leverage as the arm rises, because with the arm raised the rotator cuff dominates axial rotation ' + cite('hik') + '. Before that the pectorals twisted the arm inward in every press and the small cuff had to cancel it, so close-grip bench came out at a third of a competition bench. Now, with a typical set of maxes: close grip about 82% of your bench (lifters usually manage about 90%), wide grip about 105% (usually within a few percent), flat-back flared about 90%. Still wrong: a 30° incline near 60% (30 trained lifters managed 78% in Rodríguez-Ridao 2020; see the checks below), behind-the-neck near 50% and wide-grip or layback press near 70 to 75% of your strict press. At those positions this criterion (minimise the sum of squared activations, as OpenSim does) loads the strongest muscle disproportionately: the front deltoid on the incline. Those styles carry a warning wherever they appear. Squat and deadlift styles land closer: low bar 0 to 15% stronger than high bar depending on your squat-to-deadlift ratio, front squat 75 to 85%, sumo, trap bar and Romanian within a few percent of conventional.</p>',
     '<p><b>Also uncertain.</b> Trunk muscle strengths come from cadavers, so strong lifters end up several times above them after calibration. The trap-bar handles are assumed to hang in line with the arms.</p>',
     '<p><b>The narration</b> is not written by hand. When you change the lift, the weight or your body, the page replays the rep at 49 points and looks for moments worth pointing at: where two lifters differ most on one muscle, where the lead changes hands, where a joint load peaks, the hardest instant, the turnaround, and two-joint muscles doing the opposite of their neighbours. Each one is explained with the joint load or contraction type that causes it, in the same numbers you see elsewhere. It keeps the strongest moment in any short window, at most twelve per rep.</p>',
@@ -13812,7 +13775,7 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     }
     if (C && C.dyn) {
       const ok = C.dyn.filter((c) => c.ok).length, f3 = (v) => (v == null ? '—' : Math.abs(v) >= 20 ? fN(v) : v.toFixed(2));
-      h += '<h2>Speed, inertia and bending</h2><p class="evlede">Bar speeds from other studies against the table the tempo uses, the spine bending and lever change under load, how the low-back moment scales with load, and whether reps pushed as fast as possible come out near 100% effort, as they should if speed and strength are both right. <b>' + ok + ' of ' + C.dyn.length + '</b> land within the margin. Rows marked fitted were used to set a value and are not a test.</p>' +
+      h += '<h2>Mechanics, bending and load scaling</h2><p class="evlede">Spine bending and lever-arm changes under heavier loads, sumo versus conventional bar travel, and how peak low-back moments scale with load against lab measurements. <b>' + ok + ' of ' + C.dyn.length + '</b> land within the margin.</p>' +
         '<table class="ev"><thead><tr><th>What</th><th>Study</th><th>Model</th><th></th></tr></thead><tbody>' +
         C.dyn.map((c) => '<tr class="' + (c.ok ? 'ok' : 'off') + '"><td>' + esc(c.label) + ' <small>' + src(c.src) + (c.note ? ', ' + esc(c.note) : '') + '</small></td><td>' + f3(c.study) + '</td><td>' + f3(c.model) + '</td><td>' + (c.ok ? 'close' : 'off') + '<small>±' + c.tol + '</small></td></tr>').join('') + '</tbody></table>';
     }
@@ -14252,14 +14215,9 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
       let bi = 0, bid = null, bv = 0;
       const movC = movOf(c.lift), nounC = movC.loadType === 'bodyweight' ? 'body' : (movC.loadNoun || 'bar');
       for (let i = 0; i <= N; i++) for (const id in A[i].F) if (A[i].act[id] > bv) { bv = A[i].act[id]; bid = id; bi = i; }
-      { const tp = rep && rep.tp; // the sticking region (strength lifts only; skip for ballistic transitions)
-        const isBallistic = !!(movC.ballistic || (movC.tempoSpec && movC.tempoSpec.horizontalInertia) || movC.category === 'olympic');
-        if (!isBallistic && S.mode === 'single' && tp && tp.vStick != null && tp.dip > 0.3) add(Math.round(tp.stickU * N), 3.6, 'Sticking region: the ' + esc(nounC) + ' slows to <b>' + tp.vStick.toFixed(2) + ' m/s</b>, down from ' + tp.vPeak.toFixed(2) + ' m/s at its fastest. Near a max this is where reps stall: the push has to beat the load while the joints pass their weakest leverage.', null); }
       if (bid) {
-        const share = rep && rep.pct != null ? rep.pct : 1, fast = S.pace === 'max' && share < 0.95;
-        add(bi, 4.5, 'Hardest instant of the rep: <b>' + esc(nm(bid)) + '</b> at ' + pct(bv) + ' of what it can do at this speed.' +
-          (fast ? ' Pushed as fast as possible, a ' + pct(share) + ' load asks nearly everything of it too: the extra goes into speed, and fast-shortening muscle is weaker. Switch to Controlled to see the effort the load alone asks for.'
-            : bv >= 0.98 ? ' At this weight that is your limit.' : ' About ' + Math.round((1 - bv) * 100) + '% in reserve.'), bid);
+        add(bi, 4.5, 'Hardest instant of the rep: <b>' + esc(nm(bid)) + '</b> at ' + pct(bv) + ' of its capacity.' +
+          (bv >= 0.98 ? ' At this weight that is your limit.' : ' About ' + Math.round((1 - bv) * 100) + '% in reserve.'), bid);
       }
       // 3. joint peaks
       for (const k of (movC.joints || [])) {
@@ -14416,14 +14374,6 @@ details.bgrp[open] .bgchev{transform:rotate(45deg)}
     hudTxt = txt;
     $('spd').innerHTML = '<span>' + sp + '</span>' + (frc ? '<span>' + frc + '</span>' : '');
   }
-  function updatePace() {
-    const b = $('pace'); if (!b) return;
-    b.textContent = S.pace === 'max' ? 'Max speed' : 'Controlled';
-    b.setAttribute('aria-label', 'Rep speed: ' + (S.pace === 'max' ? 'every rep pushed as fast as possible. Tap for controlled reps.' : 'controlled reps. Tap for maximal speed.'));
-    b.setAttribute('aria-pressed', S.pace === 'max');
-  }
-  $('pace').addEventListener('click', () => { S.pace = S.pace === 'max' ? 'steady' : 'max'; updatePace(); save(); touchConfig(); });
-  updatePace();
 
   // ---------------- frame loop ----------------
   let lastT = 0, flowT = 0, frameN = 0, shownPhase = '';
